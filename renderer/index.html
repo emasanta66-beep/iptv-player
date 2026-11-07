@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: blob: http: https:; media-src * blob: data:; img-src * data: blob:; connect-src * blob: data:;">
+  <title>IPTV Player</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand">IPTV Player</div>
+    <label class="lbl">Lista activa</label>
+    <select id="playlistSelect"></select>
+    <div class="row">
+      <button id="btnAdd" class="btn primary">+ Añadir</button>
+      <button id="btnDel" class="btn">Quitar</button>
+    </div>
+    <nav id="nav">
+      <button data-tab="live" class="active">📺 En vivo</button>
+      <button data-tab="movie">🎬 Películas</button>
+      <button data-tab="series">🎞️ Series</button>
+      <button data-tab="downloads">⬇ Descargas</button>
+      <button data-tab="favs">★ Favoritos</button>
+      <button data-tab="continue">⏯ Continuar viendo</button>
+    </nav>
+    <div id="status" class="status">Añade una lista para empezar</div>
+  </aside>
+
+  <main id="main">
+    <section id="playerWrap" class="hidden">
+      <div id="videoBox">
+        <video id="video" controls autoplay></video>
+        <div id="nextOverlay" class="hidden">
+          <div>Siguiente: <b id="nextTitle"></b></div>
+          <div>en <span id="nextCount">5</span> s</div>
+          <div class="row">
+            <button id="btnNextNow" class="btn primary">Reproducir ya</button>
+            <button id="btnNextCancel" class="btn">Cancelar</button>
+          </div>
+        </div>
+        <div id="playerError" class="hidden"></div>
+      </div>
+      <div id="playerSide">
+        <div id="nowTitle" class="now-title"></div>
+        <div class="row">
+          <button id="btnPrev" class="btn">⏮ Anterior</button>
+          <button id="btnNext" class="btn">Siguiente ⏭</button>
+          <button id="btnFavNow" class="btn">★</button>
+          <button id="btnAudio" class="btn" title="Convierte el audio a un formato compatible">🔊 Reparar audio</button>
+          <button id="btnVlc" class="btn">Abrir en VLC</button>
+          <button id="btnClose" class="btn">✕</button>
+        </div>
+        <label class="auto"><input type="checkbox" id="autoNext" checked> Siguiente capítulo automático</label>
+        <div id="epg"></div>
+      </div>
+    </section>
+
+    <section id="browser">
+      <div id="toolbar">
+        <select id="catSelect"></select>
+        <input id="search" type="search" placeholder="Buscar...">
+      </div>
+      <div id="crumb" class="hidden"></div>
+      <div id="grid"></div>
+      <div class="center"><button id="btnMore" class="btn hidden">Mostrar más</button></div>
+    </section>
+  </main>
+</div>
+
+<dialog id="dlgAdd">
+  <form method="dialog" id="formAdd">
+    <h3>Añadir lista</h3>
+    <div class="tabs">
+      <button type="button" data-kind="xtream" class="active">Xtream Codes</button>
+      <button type="button" data-kind="m3u">M3U (URL o archivo)</button>
+    </div>
+    <label>Nombre<input id="fName" placeholder="Mi lista"></label>
+    <div id="boxXtream">
+      <label>Servidor<input id="fServer" placeholder="http://servidor.com:8080"></label>
+      <label>Usuario<input id="fUser"></label>
+      <label>Contraseña<input id="fPass" type="password"></label>
+    </div>
+    <div id="boxM3u" class="hidden">
+      <label>URL de la lista<input id="fUrl" placeholder="http://.../lista.m3u"></label>
+      <button type="button" id="btnFile" class="btn">Elegir archivo .m3u…</button>
+      <span id="fileName" class="muted"></span>
+      <label>URL de EPG XMLTV (opcional)<input id="fEpg" placeholder="http://.../epg.xml o .xml.gz"></label>
+    </div>
+    <div class="row end">
+      <button type="button" id="btnCancelAdd" class="btn">Cancelar</button>
+      <button type="submit" id="btnSaveAdd" class="btn primary">Guardar</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="../node_modules/hls.js/dist/hls.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

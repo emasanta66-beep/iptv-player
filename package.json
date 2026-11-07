@@ -1,0 +1,46 @@
+{
+  "name": "iptv-player",
+  "version": "1.0.0",
+  "description": "Reproductor IPTV (Xtream y M3U) con favoritos, continuar viendo, EPG y siguiente capítulo automático",
+  "author": "Ema",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis --publish never",
+    "publish": "electron-builder --win nsis --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.0",
+    "ffmpeg-static": "^5.2.0",
+    "hls.js": "^1.5.0"
+  },
+  "devDependencies": {
+    "electron": "latest",
+    "electron-builder": "latest"
+  },
+  "build": {
+    "appId": "com.ema.iptvplayer",
+    "productName": "IPTV Player",
+    "directories": { "output": "dist" },
+    "files": ["main.js", "preload.js", "renderer/**/*", "package.json"],
+    "asarUnpack": ["node_modules/ffmpeg-static/**"],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "emasanta66-beep",
+        "repo": "iptv-player",
+        "releaseType": "release"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}
