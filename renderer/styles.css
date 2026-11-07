@@ -142,6 +142,12 @@ select, input[type=search], dialog input {
 .dlplot { color: var(--muted); font-size: 12px; display: -webkit-box; -webkit-line-clamp: 2;
   -webkit-box-orient: vertical; overflow: hidden; }
 .dlbtns { margin-top: auto; padding-top: 4px; }
+.catlist { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow: auto; margin: 10px 0; }
+.catrow { display: flex; align-items: center; gap: 8px; background: var(--panel2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 8px; }
+.catrow .catname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.catrow .btn { padding: 4px 9px; }
+.catrow .btn:disabled { opacity: .35; cursor: default; }
 .dlbar { height: 6px; background: var(--panel2); border-radius: 4px; overflow: hidden; }
 .dlbar > div { height: 100%; background: var(--accent); transition: width .3s; }
 .dlrow.done .dlbar > div { background: #2ecc71; }

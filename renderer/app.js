@@ -25,7 +25,7 @@ function b64utf8(str) {
 }
 
 /* ===================== estado persistente ===================== */
-const S = Object.assign({ playlists: [], active: null, favs: {}, progress: {}, autoNext: true },
+const S = Object.assign({ playlists: [], active: null, favs: {}, progress: {}, autoNext: true, catOrder: {} },
   JSON.parse(localStorage.getItem('iptv') || '{}'));
 function save() {
   try { localStorage.setItem('iptv', JSON.stringify(S)); } catch (e) { /* cuota */ }
@@ -193,9 +193,10 @@ function fillCategories() {
   const p = activePl();
   const show = p && ['live', 'movie', 'series'].includes(tab) && !viewSeries;
   sel.classList.toggle('hidden', !show);
+  $('#btnCatEdit').classList.toggle('hidden', !show);
   if (!show) return;
   const cats = ((cache[p.id] || {}).cats || {})[tab] || {};
-  const entries = Object.entries(cats).sort((a, b) => String(a[1]).localeCompare(String(b[1])));
+  const entries = orderedCats(p.id, tab, Object.entries(cats));
   sel.innerHTML = '<option value="all">(Todas las categorías)</option>' +
     entries.map(([id, name]) => `<option value="${esc(id)}">${esc(name)}</option>`).join('');
   sel.value = entries.some(([id]) => id === curCat) ? curCat : 'all';
@@ -1083,6 +1084,66 @@ $('#btnUpd').addEventListener('click', () => { window.iptv.updCheck(); });
 $('#btnRel').addEventListener('click', () => { window.iptv.updReleases(); });
 window.iptv.onUpdStatus(renderUpd);
 window.iptv.updState().then(renderUpd);
+
+/* ===================== orden de categorías ===================== */
+// Las categorías que el usuario ordenó van primero, en ese orden; el resto sigue alfabético.
+function orderedCats(pid, t, entries) {
+  const order = (S.catOrder[pid] && S.catOrder[pid][t]) || [];
+  const rank = new Map(order.map((id, i) => [id, i]));
+  return entries.slice().sort((a, b) => {
+    const ra = rank.has(a[0]) ? rank.get(a[0]) : Infinity;
+    const rb = rank.has(b[0]) ? rank.get(b[0]) : Infinity;
+    if (ra !== rb) return ra - rb;
+    return String(a[1]).localeCompare(String(b[1]));
+  });
+}
+
+let catDraft = [];
+function renderCatDraft() {
+  $('#catList').innerHTML = catDraft.map((c, i) => `<div class="catrow">
+      <span class="catname">${esc(c[1])}</span>
+      <button class="btn" data-up="${i}" ${i === 0 ? 'disabled' : ''} title="Subir">▲</button>
+      <button class="btn" data-down="${i}" ${i === catDraft.length - 1 ? 'disabled' : ''} title="Bajar">▼</button>
+    </div>`).join('') || '<p class="muted">No hay categorías.</p>';
+}
+$('#btnCatEdit').addEventListener('click', () => {
+  const p = activePl();
+  if (!p || !['live', 'movie', 'series'].includes(tab)) return;
+  const cats = ((cache[p.id] || {}).cats || {})[tab] || {};
+  catDraft = orderedCats(p.id, tab, Object.entries(cats));
+  renderCatDraft();
+  $('#dlgCats').showModal();
+});
+$('#catList').addEventListener('click', (e) => {
+  const up = e.target.closest('[data-up]');
+  const dn = e.target.closest('[data-down]');
+  if (up) {
+    const i = parseInt(up.dataset.up, 10);
+    [catDraft[i - 1], catDraft[i]] = [catDraft[i], catDraft[i - 1]];
+    renderCatDraft();
+  } else if (dn) {
+    const i = parseInt(dn.dataset.down, 10);
+    [catDraft[i + 1], catDraft[i]] = [catDraft[i], catDraft[i + 1]];
+    renderCatDraft();
+  }
+});
+$('#btnCatSave').addEventListener('click', () => {
+  const p = activePl();
+  if (p) {
+    S.catOrder[p.id] = S.catOrder[p.id] || {};
+    S.catOrder[p.id][tab] = catDraft.map((c) => c[0]);
+    save();
+  }
+  $('#dlgCats').close();
+  fillCategories();
+});
+$('#btnCatReset').addEventListener('click', () => {
+  const p = activePl();
+  if (p && S.catOrder[p.id]) { delete S.catOrder[p.id][tab]; save(); }
+  $('#dlgCats').close();
+  fillCategories();
+});
+$('#btnCatCancel').addEventListener('click', () => $('#dlgCats').close());
 
 /* ===================== inicio ===================== */
 window.iptv.onDlUpdate((list) => {

@@ -20,9 +20,9 @@
       <button data-tab="live" class="active">📺 En vivo</button>
       <button data-tab="movie">🎬 Películas</button>
       <button data-tab="series">🎞️ Series</button>
-      <button data-tab="downloads">⬇ Descargas</button>
       <button data-tab="favs">★ Favoritos</button>
       <button data-tab="continue">⏯ Continuar viendo</button>
+      <button data-tab="downloads">⬇ Descargas</button>
     </nav>
     <div class="upd">
       <div id="verLbl" class="ver"></div>
@@ -65,6 +65,7 @@
     <section id="browser">
       <div id="toolbar">
         <select id="catSelect"></select>
+        <button id="btnCatEdit" class="btn" title="Elegir qué categorías aparecen primero">⇅ Ordenar</button>
         <input id="search" type="search" placeholder="Buscar...">
       </div>
       <div id="crumb" class="hidden"></div>
@@ -98,6 +99,17 @@
       <button type="submit" id="btnSaveAdd" class="btn primary">Guardar</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="dlgCats">
+  <h3>Ordenar categorías</h3>
+  <div class="muted">Las que pongas arriba aparecen primero en la lista.</div>
+  <div id="catList" class="catlist"></div>
+  <div class="row end">
+    <button type="button" id="btnCatReset" class="btn">Orden original</button>
+    <button type="button" id="btnCatCancel" class="btn">Cancelar</button>
+    <button type="button" id="btnCatSave" class="btn primary">Guardar</button>
+  </div>
 </dialog>
 
 <script src="../node_modules/hls.js/dist/hls.min.js"></script>
