@@ -204,8 +204,9 @@ ipcMain.handle('open-vlc', async (_e, url, opts) => {
     if (path.isAbsolute(exe) && !fs.existsSync(exe)) continue;
     try {
       const t0 = Date.now();
-      const child = spawn(exe, [target, '--extraintf=rc', '--rc-host=127.0.0.1:' + port, '--rc-quiet'],
-        { detached: true, stdio: 'ignore' });
+      // stdin abierto: si VLC lo ve cerrado, se apaga solo
+      const child = spawn(exe, [target, '--extraintf=rc', '--rc-host=127.0.0.1:' + port, '--rc-quiet', '--no-one-instance'],
+        { detached: true, stdio: ['pipe', 'ignore', 'ignore'] });
       child.on('error', () => {});
       child.unref();
       // si VLC se cierra al instante (no acepta alguna opción), se abre otra vez sin la conexión de control
