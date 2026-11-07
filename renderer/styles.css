@@ -33,10 +33,11 @@ select, input[type=search], dialog input {
 #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #playerWrap { display: flex; gap: 14px; padding: 14px; background: #0b0d11;
   border-bottom: 1px solid var(--line); }
-#videoBox { position: relative; flex: 1; min-width: 0; background: #000; border-radius: 10px;
-  overflow: hidden; aspect-ratio: 16/9; max-height: 52vh; }
-#video { width: 100%; height: 100%; background: #000; }
-#nextOverlay { position: absolute; right: 14px; bottom: 60px; background: rgba(15,17,21,.92);
+#videoBox { --bar-h: 64px; position: relative; flex: 1; min-width: 0; background: #000; border-radius: 12px;
+  overflow: hidden; aspect-ratio: 16/9; max-height: 52vh; display: flex; flex-direction: column; }
+#vstage { position: relative; flex: 1; min-height: 0; background: #000; }
+#video { display: block; width: 100%; height: 100%; background: #000; object-fit: contain; }
+#nextOverlay { position: absolute; right: 14px; bottom: 14px; background: rgba(15,17,21,.92);
   border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: flex;
   flex-direction: column; gap: 8px; max-width: 60%; }
 #playerError { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -159,11 +160,75 @@ select, input[type=search], dialog input {
 .dlrow.error .dlbar > div { background: #c0392b; }
 .dlmeta { color: var(--muted); font-size: 12px; margin-top: 5px; }
 .dlbtns { flex-wrap: wrap; }
-.vctrl { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; z-index: 4; opacity: .9; }
-.vctrl .btn { background: rgba(0,0,0,.6); border-color: rgba(255,255,255,.15); }
-.vctrl .btn:hover { background: rgba(0,0,0,.8); }
-#trackMenu { position: absolute; top: 48px; right: 10px; z-index: 5; min-width: 240px; max-height: 65%;
-  overflow: auto; background: rgba(15,17,21,.96); border: 1px solid var(--line); border-radius: 10px; padding: 8px; }
+/* ---- barra de controles del reproductor ---- */
+.vbar { flex: 0 0 var(--bar-h); height: var(--bar-h); display: flex; align-items: center; gap: 6px;
+  padding: 0 16px; background: #000; color: #fff; user-select: none; }
+.vbtn { flex: 0 0 auto; width: 40px; height: 40px; display: inline-flex; align-items: center;
+  justify-content: center; padding: 0; background: transparent; color: #fff; border: 0;
+  border-radius: 50%; cursor: pointer; }
+.vbtn:hover { background: rgba(255,255,255,.14); }
+.vbtn svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round; }
+.vbtn svg .f { fill: currentColor; }
+.vbtn svg text { fill: currentColor; stroke: none; font-size: 8.5px; font-weight: 700;
+  font-family: system-ui, "Segoe UI", Roboto, sans-serif; }
+/* íconos que cambian según el estado */
+.i-pause, .i-mute, .i-cc-on, .i-fsx { display: none; }
+#videoBox.is-playing .i-play { display: none; }
+#videoBox.is-playing .i-pause { display: block; }
+#videoBox.is-muted .i-vol { display: none; }
+#videoBox.is-muted .i-mute { display: block; }
+#videoBox.has-subs .i-cc-off { display: none; }
+#videoBox.has-subs .i-cc-on { display: block; }
+#videoBox.is-fs .i-fs { display: none; }
+#videoBox.is-fs .i-fsx { display: block; }
+
+/* barra de progreso con los tiempos debajo de los extremos */
+.vseek { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; margin: 0 10px; }
+.vtimes { display: flex; justify-content: space-between; font-size: 12px; color: #fff;
+  font-variant-numeric: tabular-nums; line-height: 1.2; }
+.vrange { -webkit-appearance: none; appearance: none; width: 100%; height: 16px; margin: 0;
+  background: transparent; cursor: pointer; }
+.vrange:focus { outline: none; }
+.vrange::-webkit-slider-runnable-track { height: 4px; border-radius: 2px;
+  background: linear-gradient(to right, #fff var(--p, 0%), rgba(255,255,255,.3) var(--p, 0%)); }
+.vrange::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+  background: #fff; margin-top: -5px; }
+.vlive { display: none; flex: 1; align-items: center; margin: 0 10px; font-size: 13px;
+  font-weight: 600; letter-spacing: .6px; }
+.vlive::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: #e74c3c; margin-right: 8px; }
+#videoBox.is-live .vseek { display: none; }
+#videoBox.is-live .vlive { display: flex; }
+
+/* volumen: el control deslizante aparece al pasar el mouse */
+.vvol { display: flex; align-items: center; }
+.vvol .vrange { width: 0; opacity: 0; transition: width .15s, opacity .15s; }
+.vvol:hover .vrange, .vvol:focus-within .vrange { width: 72px; opacity: 1; margin: 0 6px 0 2px; }
+
+/* menús (audio/subtítulos y velocidad) */
+.vwrap { position: relative; flex: 0 0 auto; }
+.vmenu { position: absolute; right: 0; bottom: calc(100% + 10px); z-index: 6; min-width: 220px;
+  max-height: calc(52vh - var(--bar-h) - 24px); overflow: auto; background: rgba(15,17,21,.96);
+  border: 1px solid var(--line); border-radius: 10px; padding: 8px; }
+#speedMenu { min-width: 150px; }
+
+/* botón de información y su panel */
+#btnInfo { position: absolute; top: 10px; right: 10px; z-index: 3; filter: drop-shadow(0 1px 3px rgba(0,0,0,.7)); }
+#vinfo { position: absolute; top: 56px; right: 10px; z-index: 4; min-width: 220px; max-width: 60%;
+  background: rgba(15,17,21,.94); border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 12px; font-size: 13px; }
+#vinfo .vi-t { font-weight: 600; margin-bottom: 6px; word-break: break-word; }
+#vinfo .vi-r { display: flex; justify-content: space-between; gap: 14px; color: var(--muted); }
+#vinfo .vi-r b { color: var(--text); font-weight: 500; }
+
+/* pantalla completa: la barra flota sobre el video y se oculta sola */
+#videoBox:fullscreen { max-height: none; aspect-ratio: auto; border-radius: 0; }
+#videoBox:fullscreen .vbar { position: absolute; left: 0; right: 0; bottom: 0; padding-top: 18px;
+  background: linear-gradient(to top, rgba(0,0,0,.85), rgba(0,0,0,0)); transition: opacity .25s; }
+#videoBox:fullscreen #nextOverlay { bottom: calc(var(--bar-h) + 14px); }
+#videoBox:fullscreen .vmenu { max-height: 70vh; }
+#videoBox.idle { cursor: none; }
+#videoBox.idle .vbar, #videoBox.idle #btnInfo { opacity: 0; pointer-events: none; }
 .tmh { color: var(--muted); font-size: 12px; margin: 6px 4px 4px; }
 .tmn { color: var(--muted); font-size: 12px; padding: 4px 8px; }
 .tm { display: block; width: 100%; text-align: left; background: transparent; color: var(--text); border: 0;

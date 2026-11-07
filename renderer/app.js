@@ -1002,8 +1002,12 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'p' || e.key === 'P') goPrev();
   if (e.key === 'j' || e.key === 'J') skip(-10);
   if (e.key === 'l' || e.key === 'L') skip(10);
-  if (e.key === 'f' || e.key === 'F') {
-    if (document.fullscreenElement) document.exitFullscreen(); else $('#videoBox').requestFullscreen();
+  if (e.key === 'f' || e.key === 'F') toggleFullscreen();
+  if (e.key === 'ArrowLeft') skip(-10);
+  if (e.key === 'ArrowRight') skip(10);
+  if ((e.key === 'k' || e.key === 'K' || (e.key === ' ' && e.target.tagName !== 'BUTTON')) && current) {
+    e.preventDefault();
+    togglePlay();
   }
 });
 
@@ -1135,24 +1139,204 @@ function selectTrack(kind, i) {
     textTracksOf(v).forEach((t, k) => { t.mode = (k === i ? 'showing' : 'disabled'); });
   }
   renderTrackMenu();
+  updateTrackIcon();
 }
 
+/* ===================== reproductor: barra de controles ===================== */
+const vbox = $('#videoBox');
+const vSeek = $('#vSeek');
+const trackMenu = $('#trackMenu');
+const speedMenu = $('#speedMenu');
+const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+let vDragging = false;   // el usuario está arrastrando la barra de progreso
+let idleTimer = null;    // oculta los controles en pantalla completa
+
+function fmtClock(s) {
+  if (!isFinite(s) || s < 0) s = 0;
+  s = Math.floor(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(sec).padStart(2, '0');
+}
+
+// Tiempo y duración "reales": si se está convirtiendo con ffmpeg el video empieza en tOffset
+function playerTimes() {
+  const off = (current && current.tOffset) || 0;
+  const cur = off + (video.currentTime || 0);
+  let dur = current && current.knownD;
+  if (!dur && isFinite(video.duration) && video.duration > 0) dur = off + video.duration;
+  return { cur, dur: dur || 0, off };
+}
+
+function updateSeekUi() {
+  if (!current) return;
+  const live = current.type === 'live';
+  vbox.classList.toggle('is-live', live);
+  if (live) return;
+  const { cur, dur } = playerTimes();
+  vSeek.max = dur || 0;
+  if (!vDragging) vSeek.value = dur ? Math.min(cur, dur) : 0;
+  const shown = vDragging ? parseFloat(vSeek.value) : cur;
+  vSeek.style.setProperty('--p', (dur ? Math.min(100, (shown / dur) * 100) : 0) + '%');
+  $('#vCur').textContent = fmtClock(shown);
+  $('#vDur').textContent = dur ? fmtClock(dur) : '--:--';
+}
+
+function updatePlayUi() {
+  const playing = !video.paused && !video.ended;
+  vbox.classList.toggle('is-playing', playing);
+  $('#vPlay').title = playing ? 'Pausar' : 'Reproducir';
+}
+
+function updateVolUi() {
+  const muted = video.muted || video.volume === 0;
+  const vol = muted ? 0 : video.volume;
+  vbox.classList.toggle('is-muted', muted);
+  $('#vVol').value = vol;
+  $('#vVol').style.setProperty('--p', (vol * 100) + '%');
+  $('#vMute').title = muted ? 'Activar sonido' : 'Silenciar';
+}
+
+function updateTrackIcon() {
+  vbox.classList.toggle('has-subs', trackList().subs.some((s) => s.active));
+}
+
+function updateFsUi() {
+  vbox.classList.toggle('is-fs', document.fullscreenElement === vbox);
+}
+
+function togglePlay() {
+  if (!current) return;
+  if (video.paused) video.play().catch(() => { /* nada */ }); else video.pause();
+}
+
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else vbox.requestFullscreen().catch(() => { /* nada */ });
+}
+
+async function togglePip() {
+  try {
+    if (document.pictureInPictureElement) await document.exitPictureInPicture();
+    else if (document.pictureInPictureEnabled && video.readyState > 0) await video.requestPictureInPicture();
+  } catch (e) { /* no disponible para este video */ }
+}
+
+/* menús: audio/subtítulos y velocidad */
+function closeMenus() {
+  trackMenu.classList.add('hidden');
+  speedMenu.classList.add('hidden');
+}
+
+function toggleMenu(menu, render) {
+  const wasHidden = menu.classList.contains('hidden');
+  closeMenus();
+  if (wasHidden) { render(); menu.classList.remove('hidden'); }
+}
+
+function renderSpeedMenu() {
+  const r = video.playbackRate;
+  speedMenu.innerHTML = '<div class="tmh">Velocidad</div>' + SPEEDS.map((s) =>
+    `<button class="tm ${s === r ? 'on' : ''}" data-speed="${s}">${s === r ? '✓ ' : ''}${s === 1 ? 'Normal' : s + '×'}</button>`
+  ).join('');
+}
+
+function renderInfo() {
+  const rows = [];
+  const { dur } = playerTimes();
+  if (video.videoWidth) rows.push(['Resolución', video.videoWidth + '×' + video.videoHeight]);
+  if (current.type !== 'live' && dur) rows.push(['Duración', fmtClock(dur)]);
+  if (current.transcoding) rows.push(['Modo', 'Convertido con ffmpeg']);
+  $('#vinfo').innerHTML = `<div class="vi-t">${esc($('#nowTitle').textContent)}</div>` +
+    rows.map((r) => `<div class="vi-r"><span>${r[0]}</span><b>${esc(r[1])}</b></div>`).join('');
+}
+
+/* en pantalla completa los controles se esconden tras 3 s sin mover el mouse */
+function wakeControls() {
+  vbox.classList.remove('idle');
+  clearTimeout(idleTimer);
+  if (document.fullscreenElement !== vbox) return;
+  idleTimer = setTimeout(() => {
+    const menuOpen = !trackMenu.classList.contains('hidden') || !speedMenu.classList.contains('hidden');
+    if (!video.paused && !menuOpen) vbox.classList.add('idle');
+  }, 3000);
+}
+
+/* eventos del video → actualizar la barra */
+['timeupdate', 'durationchange', 'loadedmetadata', 'loadstart', 'emptied'].forEach((ev) => video.addEventListener(ev, updateSeekUi));
+['play', 'pause', 'ended', 'playing', 'emptied'].forEach((ev) => video.addEventListener(ev, updatePlayUi));
+['loadedmetadata', 'playing'].forEach((ev) => video.addEventListener(ev, updateTrackIcon));
+video.addEventListener('volumechange', updateVolUi);
+
+/* botones */
+$('#vPlay').addEventListener('click', togglePlay);
 $('#btnBack10').addEventListener('click', () => skip(-10));
 $('#btnFwd10').addEventListener('click', () => skip(10));
-$('#btnGear').addEventListener('click', (e) => {
-  e.stopPropagation();
-  const m = $('#trackMenu');
-  if (m.classList.contains('hidden')) { renderTrackMenu(); m.classList.remove('hidden'); }
-  else m.classList.add('hidden');
+$('#btnTracks').addEventListener('click', () => toggleMenu(trackMenu, renderTrackMenu));
+$('#btnSpeed').addEventListener('click', () => toggleMenu(speedMenu, renderSpeedMenu));
+$('#btnPip').addEventListener('click', togglePip);
+$('#btnFs').addEventListener('click', toggleFullscreen);
+$('#btnInfo').addEventListener('click', () => {
+  const p = $('#vinfo');
+  if (p.classList.contains('hidden')) { renderInfo(); p.classList.remove('hidden'); }
+  else p.classList.add('hidden');
 });
-$('#trackMenu').addEventListener('click', (e) => {
+$('#vMute').addEventListener('click', () => {
+  if (video.muted || video.volume === 0) {
+    video.muted = false;
+    if (video.volume === 0) video.volume = 0.5;
+  } else {
+    video.muted = true;
+  }
+});
+$('#vVol').addEventListener('input', (e) => {
+  video.muted = false;
+  video.volume = parseFloat(e.target.value);
+});
+// Soltar el foco del botón para que la barra espaciadora siga pausando/reproduciendo
+$('#vbar').addEventListener('click', () => {
+  const a = document.activeElement;
+  if (a && a.tagName === 'BUTTON') a.blur();
+});
+if (!document.pictureInPictureEnabled) $('#btnPip').classList.add('hidden');
+
+/* barra de progreso: mientras se arrastra solo se muestra el tiempo; al soltar se salta */
+vSeek.addEventListener('input', () => { vDragging = true; updateSeekUi(); });
+vSeek.addEventListener('change', () => {
+  const off = (current && current.tOffset) || 0;
+  const max = isFinite(video.duration) ? video.duration : Infinity;
+  video.currentTime = Math.min(max, Math.max(0, parseFloat(vSeek.value) - off));
+  vDragging = false;
+  updateSeekUi();
+});
+
+/* clic en el video: pausar/reproducir; doble clic: pantalla completa */
+$('#vstage').addEventListener('click', (e) => { if (e.target === video) togglePlay(); });
+$('#vstage').addEventListener('dblclick', (e) => { if (e.target === video) toggleFullscreen(); });
+
+/* menús */
+trackMenu.addEventListener('click', (e) => {
   const b = e.target.closest('[data-kind]');
   if (b) selectTrack(b.dataset.kind, parseInt(b.dataset.i, 10));
 });
-document.addEventListener('click', (e) => {
-  const m = $('#trackMenu');
-  if (!m.classList.contains('hidden') && !m.contains(e.target) && e.target.id !== 'btnGear') m.classList.add('hidden');
+speedMenu.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-speed]');
+  if (!b) return;
+  video.playbackRate = parseFloat(b.dataset.speed);
+  renderSpeedMenu();
 });
+document.addEventListener('click', (e) => {
+  if (e.target.closest('#btnTracks, #btnSpeed')) return;
+  [trackMenu, speedMenu].forEach((m) => {
+    if (!m.classList.contains('hidden') && !m.contains(e.target)) m.classList.add('hidden');
+  });
+});
+
+vbox.addEventListener('mousemove', wakeControls);
+document.addEventListener('fullscreenchange', () => { updateFsUi(); wakeControls(); });
+
+updatePlayUi();
+updateVolUi();
+updateFsUi();
 
 /* ===================== actualizaciones ===================== */
 function renderUpd(s) {
