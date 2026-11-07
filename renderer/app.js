@@ -1099,12 +1099,21 @@ function orderedCats(pid, t, entries) {
 }
 
 let catDraft = [];
+let dragIdx = null;
 function renderCatDraft() {
-  $('#catList').innerHTML = catDraft.map((c, i) => `<div class="catrow">
+  $('#catList').innerHTML = catDraft.map((c, i) => `<div class="catrow" draggable="true" data-idx="${i}">
+      <span class="grip" title="Arrastra para mover">⠿</span>
       <span class="catname">${esc(c[1])}</span>
+      <button class="btn" data-top="${i}" ${i === 0 ? 'disabled' : ''} title="Poner al tope">⤒ Al tope</button>
       <button class="btn" data-up="${i}" ${i === 0 ? 'disabled' : ''} title="Subir">▲</button>
       <button class="btn" data-down="${i}" ${i === catDraft.length - 1 ? 'disabled' : ''} title="Bajar">▼</button>
     </div>`).join('') || '<p class="muted">No hay categorías.</p>';
+}
+function moveCat(from, to) {
+  if (from === to || from < 0 || to < 0 || from >= catDraft.length || to >= catDraft.length) return;
+  const [item] = catDraft.splice(from, 1);
+  catDraft.splice(to, 0, item);
+  renderCatDraft();
 }
 $('#btnCatEdit').addEventListener('click', () => {
   const p = activePl();
@@ -1115,18 +1124,38 @@ $('#btnCatEdit').addEventListener('click', () => {
   $('#dlgCats').showModal();
 });
 $('#catList').addEventListener('click', (e) => {
+  const top = e.target.closest('[data-top]');
   const up = e.target.closest('[data-up]');
   const dn = e.target.closest('[data-down]');
-  if (up) {
-    const i = parseInt(up.dataset.up, 10);
-    [catDraft[i - 1], catDraft[i]] = [catDraft[i], catDraft[i - 1]];
-    renderCatDraft();
-  } else if (dn) {
-    const i = parseInt(dn.dataset.down, 10);
-    [catDraft[i + 1], catDraft[i]] = [catDraft[i], catDraft[i + 1]];
-    renderCatDraft();
-  }
+  if (top) moveCat(parseInt(top.dataset.top, 10), 0);
+  else if (up) { const i = parseInt(up.dataset.up, 10); moveCat(i, i - 1); }
+  else if (dn) { const i = parseInt(dn.dataset.down, 10); moveCat(i, i + 1); }
 });
+// arrastrar y soltar una fila sobre otra
+$('#catList').addEventListener('dragstart', (e) => {
+  const row = e.target.closest('.catrow');
+  if (!row) return;
+  dragIdx = parseInt(row.dataset.idx, 10);
+  row.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', String(dragIdx));
+});
+$('#catList').addEventListener('dragover', (e) => {
+  const row = e.target.closest('.catrow');
+  if (dragIdx === null || !row) return;
+  e.preventDefault();
+  $$('.catrow').forEach((r) => r.classList.toggle('dropHere', r === row));
+});
+$('#catList').addEventListener('drop', (e) => {
+  const row = e.target.closest('.catrow');
+  if (dragIdx === null || !row) return;
+  e.preventDefault();
+  const to = parseInt(row.dataset.idx, 10);
+  const from = dragIdx;
+  dragIdx = null;
+  moveCat(from, to);
+});
+$('#catList').addEventListener('dragend', () => { dragIdx = null; renderCatDraft(); });
 $('#btnCatSave').addEventListener('click', () => {
   const p = activePl();
   if (p) {

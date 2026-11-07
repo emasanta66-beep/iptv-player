@@ -148,6 +148,11 @@ select, input[type=search], dialog input {
 .catrow .catname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .catrow .btn { padding: 4px 9px; }
 .catrow .btn:disabled { opacity: .35; cursor: default; }
+.catrow { cursor: grab; }
+.catrow .grip { color: var(--muted); font-size: 16px; padding: 0 2px; user-select: none; }
+.catrow.dragging { opacity: .4; }
+.catrow.dropHere { border-color: var(--accent); box-shadow: 0 -2px 0 var(--accent) inset; }
+#dlgCats { width: 540px; }
 .dlbar { height: 6px; background: var(--panel2); border-radius: 4px; overflow: hidden; }
 .dlbar > div { height: 100%; background: var(--accent); transition: width .3s; }
 .dlrow.done .dlbar > div { background: #2ecc71; }
