@@ -1,6 +1,6 @@
 {
   "name": "iptv-player",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Reproductor IPTV (Xtream y M3U) con favoritos, continuar viendo, EPG y siguiente capítulo automático",
   "author": "Ema",
   "main": "main.js",

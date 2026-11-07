@@ -1000,6 +1000,8 @@ document.addEventListener('keydown', (e) => {
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
   if (e.key === 'n' || e.key === 'N') goNext();
   if (e.key === 'p' || e.key === 'P') goPrev();
+  if (e.key === 'j' || e.key === 'J') skip(-10);
+  if (e.key === 'l' || e.key === 'L') skip(10);
   if (e.key === 'f' || e.key === 'F') {
     if (document.fullscreenElement) document.exitFullscreen(); else $('#videoBox').requestFullscreen();
   }
@@ -1071,6 +1073,85 @@ $('#btnDel').addEventListener('click', () => {
   save();
   refreshPlaylistSelect();
   setTab(tab);
+});
+
+/* ===================== reproductor: saltar 10 s, audio y subtítulos ===================== */
+function skip(sec) {
+  if (!current) return;
+  const v = $('#video');
+  const max = isFinite(v.duration) ? v.duration : Infinity;
+  v.currentTime = Math.min(max, Math.max(0, (v.currentTime || 0) + sec));
+}
+
+function textTracksOf(v) {
+  return Array.from(v.textTracks || []).filter((t) => t.kind === 'subtitles' || t.kind === 'captions');
+}
+
+function trackList() {
+  const v = $('#video');
+  const out = { audio: [], subs: [] };
+  if (hls) {
+    (hls.audioTracks || []).forEach((t, i) => out.audio.push({
+      i, label: t.name || t.lang || ('Audio ' + (i + 1)), active: hls.audioTrack === i
+    }));
+    (hls.subtitleTracks || []).forEach((t, i) => out.subs.push({
+      i, label: t.name || t.lang || ('Subtítulo ' + (i + 1)), active: hls.subtitleTrack === i
+    }));
+    return out;
+  }
+  if (v.audioTracks) {
+    for (let i = 0; i < v.audioTracks.length; i++) {
+      const t = v.audioTracks[i];
+      out.audio.push({ i, label: t.label || t.language || ('Audio ' + (i + 1)), active: !!t.enabled });
+    }
+  }
+  textTracksOf(v).forEach((t, i) => out.subs.push({
+    i, label: t.label || t.language || ('Subtítulo ' + (i + 1)), active: t.mode === 'showing'
+  }));
+  return out;
+}
+
+function renderTrackMenu() {
+  const { audio, subs } = trackList();
+  const row = (kind, t) => `<button class="tm ${t.active ? 'on' : ''}" data-kind="${kind}" data-i="${t.i}">${t.active ? '✓ ' : ''}${esc(t.label)}</button>`;
+  let html = '<div class="tmh">Audio</div>';
+  html += audio.length ? audio.map((t) => row('audio', t)).join('')
+    : '<div class="tmn">Este video no tiene otras pistas de audio</div>';
+  html += '<div class="tmh">Subtítulos</div>';
+  html += `<button class="tm ${subs.some((s) => s.active) ? '' : 'on'}" data-kind="sub" data-i="-1">Desactivados</button>`;
+  html += subs.map((t) => row('sub', t)).join('');
+  if (!subs.length) html += '<div class="tmn">Este video no trae subtítulos</div>';
+  $('#trackMenu').innerHTML = html;
+}
+
+function selectTrack(kind, i) {
+  const v = $('#video');
+  if (hls) {
+    if (kind === 'audio') hls.audioTrack = i;
+    else { hls.subtitleDisplay = i >= 0; hls.subtitleTrack = i; }
+  } else if (kind === 'audio') {
+    if (v.audioTracks) for (let k = 0; k < v.audioTracks.length; k++) v.audioTracks[k].enabled = (k === i);
+  } else {
+    textTracksOf(v).forEach((t, k) => { t.mode = (k === i ? 'showing' : 'disabled'); });
+  }
+  renderTrackMenu();
+}
+
+$('#btnBack10').addEventListener('click', () => skip(-10));
+$('#btnFwd10').addEventListener('click', () => skip(10));
+$('#btnGear').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const m = $('#trackMenu');
+  if (m.classList.contains('hidden')) { renderTrackMenu(); m.classList.remove('hidden'); }
+  else m.classList.add('hidden');
+});
+$('#trackMenu').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-kind]');
+  if (b) selectTrack(b.dataset.kind, parseInt(b.dataset.i, 10));
+});
+document.addEventListener('click', (e) => {
+  const m = $('#trackMenu');
+  if (!m.classList.contains('hidden') && !m.contains(e.target) && e.target.id !== 'btnGear') m.classList.add('hidden');
 });
 
 /* ===================== actualizaciones ===================== */
