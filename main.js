@@ -203,10 +203,20 @@ ipcMain.handle('open-vlc', async (_e, url, opts) => {
   for (const exe of candidates) {
     if (path.isAbsolute(exe) && !fs.existsSync(exe)) continue;
     try {
-      const child = spawn(exe, [target, '--extraintf=rc', '--rc-host=127.0.0.1:' + port, '--rc-quiet', '--no-one-instance'],
+      const t0 = Date.now();
+      const child = spawn(exe, [target, '--extraintf=rc', '--rc-host=127.0.0.1:' + port, '--rc-quiet'],
         { detached: true, stdio: 'ignore' });
       child.on('error', () => {});
       child.unref();
+      // si VLC se cierra al instante (no acepta alguna opción), se abre otra vez sin la conexión de control
+      child.on('exit', () => {
+        if (Date.now() - t0 < 5000 && !(vlcSess && vlcSess.started)) {
+          vlcStop();
+          const plain = spawn(exe, [target], { detached: true, stdio: 'ignore' });
+          plain.on('error', () => {});
+          plain.unref();
+        }
+      });
       if (Array.isArray(opts.entries) && opts.entries.length) {
         vlcSess = { port, pid: opts.entries[0].pid, started: false, fails: 0, tries: 0, cur: null,
           byUrl: new Map(), byKey: new Map(), timer: null };
