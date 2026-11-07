@@ -29,5 +29,10 @@ jobs:
           git config user.email "github-actions@github.com"
           git tag -f "v$V"
           git push -f origin "v$V"
+      - name: Crear el Release antes de subir archivos (evita duplicados)
+        shell: bash
+        run: |
+          V=$(node -p "require('./package.json').version")
+          gh release view "v$V" >/dev/null 2>&1 || gh release create "v$V" --title "IPTV Player $V" --notes "Versión $V"
       - name: Crear instalador y publicar Release
         run: npm run publish
