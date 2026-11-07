@@ -121,7 +121,7 @@ function parseM3U(text, pid) {
 async function ensureLoaded(tabName) {
   const p = activePl();
   if (!p) return null;
-  cache[p.id] = cache[p.id] || { loaded: {} };
+  cache[p.id] = cache[p.id] || { loaded: {}, catsLoaded: {}, byCat: {} };
   const c = cache[p.id];
 
   if (p.type === 'm3u') {
@@ -142,16 +142,37 @@ async function ensureLoaded(tabName) {
     return c;
   }
 
-  // Xtream
-  if (c.loaded[tabName]) return c;
+  // Xtream: aquí solo se cargan las categorías (es rápido).
+  // Los elementos se piden por categoría con ensureCategory(), para no bajar todo el catálogo.
+  if (c.catsLoaded[tabName]) return c;
   const catAction = { live: 'get_live_categories', movie: 'get_vod_categories', series: 'get_series_categories' }[tabName];
-  const listAction = { live: 'get_live_streams', movie: 'get_vod_streams', series: 'get_series' }[tabName];
-  setStatus('Cargando…');
-  const [cs, ls] = await Promise.all([api(p, catAction), api(p, listAction)]);
+  setStatus('Cargando categorías…');
+  const cs = await api(p, catAction);
   c.cats = c.cats || { live: {}, movie: {}, series: {} };
   c.cats[tabName] = {};
   (Array.isArray(cs) ? cs : []).forEach((x) => { c.cats[tabName][String(x.category_id)] = x.category_name; });
-  c[tabName] = (Array.isArray(ls) ? ls : []).map((r) => {
+  c.catsLoaded[tabName] = true;
+  return c;
+}
+
+// ¿Falta pedir al servidor los elementos de esta categoría? (solo listas Xtream)
+function categoryPending(tabName, catId) {
+  const p = activePl();
+  const c = p && cache[p.id];
+  if (!p || p.type === 'm3u' || !c || c.loaded[tabName]) return false;
+  return catId === 'all' || !((c.byCat[tabName] || {})[catId]);
+}
+
+// Xtream: trae solo los elementos de una categoría ('all' trae todo el catálogo, tarda más).
+// Las listas M3U ya vienen completas, así que no hacen nada aquí.
+async function ensureCategory(tabName, catId) {
+  if (!categoryPending(tabName, catId)) return;
+  const p = activePl();
+  const c = cache[p.id];
+  const listAction = { live: 'get_live_streams', movie: 'get_vod_streams', series: 'get_series' }[tabName];
+  setStatus('Cargando…');
+  const ls = await api(p, listAction, catId === 'all' ? '' : '&category_id=' + enc(catId));
+  const items = (Array.isArray(ls) ? ls : []).map((r) => {
     const id = r.stream_id != null ? r.stream_id : r.series_id;
     return {
       key: `${p.id}:${tabName}:${id}`, pid: p.id, type: tabName,
@@ -160,8 +181,22 @@ async function ensureLoaded(tabName) {
       epgId: r.epg_channel_id || ''
     };
   });
-  c.loaded[tabName] = true;
-  return c;
+  if (catId === 'all') {
+    c[tabName] = items;
+    c.loaded[tabName] = true;
+  } else {
+    const have = new Set((c[tabName] || []).map((i) => i.key));
+    c[tabName] = (c[tabName] || []).concat(items.filter((i) => !have.has(i.key)));
+    c.byCat[tabName] = c.byCat[tabName] || {};
+    c.byCat[tabName][catId] = true;
+  }
+}
+
+// Primera categoría según el orden de la lista (el que el usuario eligió con “Ordenar”)
+function firstCat(p, tabName) {
+  const cats = ((cache[p.id] || {}).cats || {})[tabName] || {};
+  const first = orderedCats(p.id, tabName, Object.entries(cats))[0];
+  return first ? first[0] : 'all';
 }
 
 /* ===================== URLs de reproducción ===================== */
@@ -824,8 +859,20 @@ async function setTab(t) {
   const p = activePl();
   if (!p) { render(); return; }
   try {
-    if (['live', 'movie', 'series'].includes(t)) await ensureLoaded(t);
-    else await ensureLoadedForFavs();
+    if (['live', 'movie', 'series'].includes(t)) {
+      await ensureLoaded(t);
+      if (tab !== t) return;                 // cambió de sección mientras cargaba
+      // empieza en la primera categoría de la lista, no en “todas”
+      curCat = firstCat(p, t);
+      if (categoryPending(t, curCat)) {
+        $('#grid').innerHTML = '<p class="muted">Cargando…</p>';
+        $('#btnMore').classList.add('hidden');
+      }
+      await ensureCategory(t, curCat);
+      if (tab !== t) return;
+    } else {
+      await ensureLoadedForFavs();
+    }
   } catch (err) {
     setStatus('Error: ' + err.message);
   }
@@ -849,7 +896,21 @@ $('#nav').addEventListener('click', (e) => {
   if (b) setTab(b.dataset.tab);
 });
 $('#playlistSelect').addEventListener('change', (e) => switchPlaylist(e.target.value));
-$('#catSelect').addEventListener('change', (e) => { curCat = e.target.value; limit = 200; render(); });
+$('#catSelect').addEventListener('change', async (e) => {
+  const cat = e.target.value;
+  curCat = cat;
+  limit = 200;
+  try {
+    if (categoryPending(tab, cat)) {
+      $('#grid').innerHTML = '<p class="muted">Cargando…</p>';
+      $('#btnMore').classList.add('hidden');
+    }
+    await ensureCategory(tab, cat);
+  } catch (err) {
+    setStatus('Error: ' + err.message);
+  }
+  if (curCat === cat) render();             // si eligió otra mientras cargaba, esa se encarga
+});
 let searchTimer;
 $('#search').addEventListener('input', (e) => {
   clearTimeout(searchTimer);
