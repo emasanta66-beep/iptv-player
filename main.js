@@ -5,6 +5,7 @@ const os = require('os');
 const zlib = require('zlib');
 const http = require('http');
 const https = require('https');
+const net = require('net');
 const { pathToFileURL } = require('url');
 const { spawn } = require('child_process');
 
@@ -135,7 +136,7 @@ app.on('window-all-closed', () => {
   stopTranscode();
   if (process.platform !== 'darwin') app.quit();
 });
-app.on('before-quit', () => { stopTranscode(); dlPauseAll(); });
+app.on('before-quit', () => { stopTranscode(); dlPauseAll(); vlcStop(); });
 
 function maybeGunzip(buf) {
   if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
@@ -175,6 +176,8 @@ ipcMain.handle('open-m3u-file', async () => {
 // Abrir una URL en VLC (alternativa cuando el reproductor integrado no soporta el formato)
 ipcMain.handle('open-vlc', async (_e, url, opts) => {
   opts = opts || {};
+  vlcStop();
+  const port = 49152 + Math.floor(Math.random() * 10000);
   // Con varios episodios se crea una lista .m3u8 para que VLC los reproduzca seguidos
   let target = url;
   if (Array.isArray(opts.entries) && opts.entries.length) {
@@ -200,14 +203,81 @@ ipcMain.handle('open-vlc', async (_e, url, opts) => {
   for (const exe of candidates) {
     if (path.isAbsolute(exe) && !fs.existsSync(exe)) continue;
     try {
-      const child = spawn(exe, [target], { detached: true, stdio: 'ignore' });
+      const child = spawn(exe, [target, '--extraintf=rc', '--rc-host=127.0.0.1:' + port, '--rc-quiet', '--no-one-instance'],
+        { detached: true, stdio: 'ignore' });
       child.on('error', () => {});
       child.unref();
+      if (Array.isArray(opts.entries) && opts.entries.length) {
+        vlcSess = { port, pid: opts.entries[0].pid, started: false, fails: 0, tries: 0, cur: null,
+          byUrl: new Map(), byKey: new Map(), timer: null };
+        opts.entries.forEach((e) => { vlcSess.byUrl.set(e.url, e); vlcSess.byKey.set(e.key, e); });
+        vlcSess.timer = setInterval(vlcTick, 3000);
+      }
       return { ok: true };
     } catch (e) { /* probar el siguiente */ }
   }
   return { ok: false, error: 'No se encontró VLC' };
 });
+
+/* ===================== seguimiento de VLC (qué capítulo se vio) ===================== */
+// VLC se abre con su interfaz de control en un puerto local. Cada 3 s se pregunta
+// qué está reproduciendo y en qué segundo va. Al pasar el 90% se marca como visto.
+let vlcSess = null;
+
+function vlcStop() {
+  if (vlcSess && vlcSess.timer) clearInterval(vlcSess.timer);
+  vlcSess = null;
+}
+
+function vlcSend(m) {
+  BrowserWindow.getAllWindows().forEach((w) => {
+    if (!w.isDestroyed()) w.webContents.send('vlc-progress', m);
+  });
+}
+
+function vlcRead(port) {
+  return new Promise((resolve) => {
+    const sock = net.connect(port, '127.0.0.1');
+    let buf = '';
+    const timer = setTimeout(() => sock.destroy(), 2000);
+    sock.on('connect', () => sock.write('get_time\nget_length\nstatus\nquit\n'));
+    sock.on('data', (d) => { buf += d.toString('utf8'); });
+    sock.on('error', () => { clearTimeout(timer); resolve(null); });
+    sock.on('close', () => { clearTimeout(timer); resolve(buf || null); });
+  });
+}
+
+function vlcParse(buf) {
+  const nums = [...buf.matchAll(/^\s*(?:>\s*)?(\d+)\s*$/gm)].map((m) => parseInt(m[1], 10));
+  const inp = buf.match(/new input:\s*(\S+)/);
+  return { t: nums[0], d: nums[1], uri: inp ? inp[1] : '' };
+}
+
+function vlcFind(s, uri) {
+  if (s.byUrl.has(uri)) return s.byUrl.get(uri);
+  const m = uri.match(/\/(series|movie)\/[^/]+\/[^/]+\/(\d+)\./);
+  if (!m) return null;
+  return s.byKey.get(`${s.pid}:${m[1] === 'series' ? 'ep' : 'movie'}:${m[2]}`) || null;
+}
+
+function vlcTick() {
+  const s = vlcSess;
+  if (!s) return;
+  vlcRead(s.port).then((buf) => {
+    if (vlcSess !== s) return;
+    if (!buf) {
+      if (s.started) { if (++s.fails >= 3) vlcStop(); }   // VLC se cerró
+      else if (++s.tries >= 20) vlcStop();                 // nunca abrió la interfaz
+      return;
+    }
+    s.started = true;
+    s.fails = 0;
+    const { t, d, uri } = vlcParse(buf);
+    const e = vlcFind(s, uri);
+    if (!e || !d || !isFinite(t)) return;
+    vlcSend(Object.assign({}, e, { t, d, done: t >= d * 0.9 }));
+  });
+}
 
 ipcMain.handle('open-external', (_e, url) => shell.openExternal(url));
 

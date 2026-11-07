@@ -15,5 +15,6 @@ contextBridge.exposeInMainWorld('iptv', {
   updCheck: () => ipcRenderer.invoke('upd-check'),
   updState: () => ipcRenderer.invoke('upd-state'),
   updReleases: () => ipcRenderer.invoke('upd-releases'),
-  onUpdStatus: (cb) => ipcRenderer.on('upd-status', (_e, s) => cb(s))
+  onUpdStatus: (cb) => ipcRenderer.on('upd-status', (_e, s) => cb(s)),
+  onVlcProgress: (cb) => ipcRenderer.on('vlc-progress', (_e, m) => cb(m))
 });

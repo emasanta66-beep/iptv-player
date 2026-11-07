@@ -46,6 +46,7 @@ let countdownTimer = null;
 let lastSave = 0;
 let checkTimer = null;           // detección de audio/video no compatible
 let dlList = [];                 // descargas (las actualiza el proceso principal)
+let vlcQueue = [];               // capítulos enviados a VLC (para marcar el siguiente)
 
 const activePl = () => S.playlists.find((p) => p.id === S.active) || null;
 
@@ -974,12 +975,25 @@ $('#btnVlc').addEventListener('click', async () => {
   v_pause();
   const pos = (current.tOffset || 0) + (video.currentTime || 0);
   const opts = {};
+  const pid = activePl().id;
   if (current.queue) {
     // el capítulo actual y todos los siguientes, para que VLC avance solo
+    const sref = current.seriesItem ? seriesRefOf(current.seriesItem) : null;
     const prefix = current.seriesItem ? current.seriesItem.title + ' ' : '';
-    opts.entries = current.queue.slice(current.index).map((e, i) => ({
-      title: prefix + e.title, url: e.url, startTime: i === 0 ? pos : 0
+    vlcQueue = current.queue.map((e) => ({
+      key: e.key, pid, url: e.url, title: e.title, type: 'episode', seriesRef: sref, img: e.img || ''
     }));
+    opts.entries = vlcQueue.slice(current.index).map((e, i) => Object.assign({}, e, {
+      title: prefix + e.title, startTime: i === 0 ? pos : 0
+    }));
+  } else if (current.type === 'movie' && current.item) {
+    vlcQueue = [];
+    const it = current.item;
+    opts.entries = [{
+      key: current.key, pid, url: current.url, title: current.title, type: 'movie', img: it.logo || '',
+      itemRef: { key: it.key, title: it.title, logo: it.logo || '', type: 'movie', url: current.url, pid },
+      startTime: pos
+    }];
   }
   const r = await window.iptv.openVlc(current.url, opts);
   if (!r.ok) showError(r.error || 'No se pudo abrir VLC');
@@ -1173,6 +1187,35 @@ $('#btnCatReset').addEventListener('click', () => {
   fillCategories();
 });
 $('#btnCatCancel').addEventListener('click', () => $('#dlgCats').close());
+
+/* ===================== progreso desde VLC ===================== */
+window.iptv.onVlcProgress((m) => {
+  if (!m || !m.key || !m.pid) return;
+  const prev = S.progress[m.key] || {};
+  const wasDone = !!prev.done;
+  const entry = Object.assign({}, prev, {
+    key: m.key, pid: m.pid, title: m.title, url: m.url, type: m.type || 'episode',
+    t: m.t, d: m.d, updated: Date.now(), done: wasDone || !!m.done
+  });
+  if (m.seriesRef) entry.seriesRef = m.seriesRef;
+  if (m.itemRef) entry.itemRef = m.itemRef;
+  if (m.img) entry.img = m.img;
+  S.progress[m.key] = entry;
+  if (m.done && !wasDone) {
+    // al terminar un capítulo en VLC, dejar el siguiente listo en "Continuar viendo"
+    const i = vlcQueue.findIndex((e) => e.key === m.key);
+    const nx = i >= 0 ? vlcQueue[i + 1] : null;
+    if (nx && !S.progress[nx.key]) {
+      S.progress[nx.key] = {
+        key: nx.key, pid: m.pid, title: nx.title, url: nx.url, type: 'episode',
+        t: 0, d: 0, updated: Date.now() + 1, done: false,
+        seriesRef: nx.seriesRef || null, img: nx.img || ''
+      };
+    }
+    render();
+  }
+  save();
+});
 
 /* ===================== inicio ===================== */
 window.iptv.onDlUpdate((list) => {
