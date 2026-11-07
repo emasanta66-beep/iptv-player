@@ -36,7 +36,7 @@ npx electron-builder
 - `crear-exe.bat`: doble clic para generar un instalador en la carpeta `dist` (`IPTV Player Setup 1.0.0.exe`). Al instalarlo crea un acceso directo en el escritorio.
 
 ## Actualizaciones automáticas
-La app instalada busca versiones nuevas en GitHub Releases al abrirse, las descarga y pregunta si reiniciar.
+La app instalada busca versiones nuevas en GitHub Releases cada 3 días (y al abrirla, si ya pasaron 3 días desde la última revisión). La descarga y pregunta si reiniciar.
 1. Crea un repositorio **público** en GitHub (por ejemplo `iptv-player`).
 2. En `package.json`, sección `build > publish`, cambia `TU_USUARIO_GITHUB` por tu usuario (y `repo` si usaste otro nombre).
 3. Crea un token en GitHub (Settings > Developer settings > Personal access tokens > Tokens (classic), permiso `repo`).

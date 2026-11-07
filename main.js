@@ -55,7 +55,27 @@ function setupUpdater(win) {
     }).then((r) => { if (r.response === 0) autoUpdater.quitAndInstall(); });
   });
   autoUpdater.on('error', () => { /* sin internet o sin versión nueva: ignorar */ });
-  autoUpdater.checkForUpdates().catch(() => {});
+
+  // Revisa cada 3 días. Se guarda la fecha de la última revisión para que,
+  // al abrir la app, espere solo lo que falte (no vuelve a revisar al reiniciar).
+  const check = () => {
+    markUpdateCheck();
+    autoUpdater.checkForUpdates().catch(() => {});
+  };
+  const wait = Math.max(5000, UPDATE_EVERY - (Date.now() - lastUpdateCheck()));
+  setTimeout(() => {
+    check();
+    setInterval(check, UPDATE_EVERY);
+  }, wait);
+}
+
+const UPDATE_EVERY = 3 * 24 * 60 * 60 * 1000;
+const updateStamp = () => path.join(app.getPath('userData'), 'update-check.json');
+function lastUpdateCheck() {
+  try { return JSON.parse(fs.readFileSync(updateStamp(), 'utf8')).t || 0; } catch (e) { return 0; }
+}
+function markUpdateCheck() {
+  try { fs.writeFileSync(updateStamp(), JSON.stringify({ t: Date.now() })); } catch (e) { /* nada */ }
 }
 
 app.whenReady().then(() => {
