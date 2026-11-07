@@ -11,5 +11,9 @@ contextBridge.exposeInMainWorld('iptv', {
   dlList: () => ipcRenderer.invoke('dl-list'),
   dlFileUrl: (id) => ipcRenderer.invoke('dl-file-url', id),
   dlReveal: (id) => ipcRenderer.invoke('dl-reveal', id),
-  onDlUpdate: (cb) => ipcRenderer.on('dl-update', (_e, list) => cb(list))
+  onDlUpdate: (cb) => ipcRenderer.on('dl-update', (_e, list) => cb(list)),
+  updCheck: () => ipcRenderer.invoke('upd-check'),
+  updState: () => ipcRenderer.invoke('upd-state'),
+  updReleases: () => ipcRenderer.invoke('upd-releases'),
+  onUpdStatus: (cb) => ipcRenderer.on('upd-status', (_e, s) => cb(s))
 });

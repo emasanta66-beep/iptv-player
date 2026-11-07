@@ -35,15 +35,35 @@ function createWindow() {
   setupUpdater(win);
 }
 
-// Actualización automática (solo en la app instalada): busca una versión nueva
-// en GitHub Releases al abrir, la descarga y pregunta si reiniciar.
+// Actualizaciones (solo en la app instalada): revisa cada 3 días y permite
+// buscarlas a mano. El estado se muestra en la barra lateral de la app.
+let autoUpdater = null;
+let updState = { state: 'idle', msg: '', version: app.getVersion() };
+
+function updSend(state, msg, extra) {
+  updState = Object.assign({ state, msg, version: app.getVersion() }, extra || {});
+  BrowserWindow.getAllWindows().forEach((w) => {
+    if (!w.isDestroyed()) w.webContents.send('upd-status', updState);
+  });
+}
+
 function setupUpdater(win) {
-  if (!app.isPackaged) return;
-  let autoUpdater;
-  try { ({ autoUpdater } = require('electron-updater')); } catch (e) { return; }
+  if (!app.isPackaged) {
+    updSend('dev', 'Las actualizaciones solo funcionan en la app instalada.');
+    return;
+  }
+  try { ({ autoUpdater } = require('electron-updater')); }
+  catch (e) { updSend('error', 'No se pudo cargar el actualizador.'); return; }
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on('checking-for-update', () => updSend('checking', 'Buscando actualizaciones…'));
+  autoUpdater.on('update-not-available', () => updSend('uptodate', 'Estás al día.'));
+  autoUpdater.on('update-available', (info) => updSend('available',
+    'Hay una versión nueva (' + info.version + '). Descargando…', { newVersion: info.version }));
+  autoUpdater.on('download-progress', (p) => updSend('downloading',
+    'Descargando ' + Math.round(p.percent) + '%…', { percent: Math.round(p.percent) }));
   autoUpdater.on('update-downloaded', (info) => {
+    updSend('ready', 'La versión ' + info.version + ' está lista para instalar.', { newVersion: info.version });
     dialog.showMessageBox(win, {
       type: 'info',
       buttons: ['Reiniciar ahora', 'Más tarde'],
@@ -54,7 +74,8 @@ function setupUpdater(win) {
       detail: 'Reinicia la app para aplicarla. Si eliges "Más tarde", se instalará al cerrarla.'
     }).then((r) => { if (r.response === 0) autoUpdater.quitAndInstall(); });
   });
-  autoUpdater.on('error', () => { /* sin internet o sin versión nueva: ignorar */ });
+  autoUpdater.on('error', (err) => updSend('error',
+    'No se pudo revisar: ' + ((err && err.message) ? err.message.split('\n')[0] : 'sin conexión')));
 
   // Revisa cada 3 días. Se guarda la fecha de la última revisión para que,
   // al abrir la app, espere solo lo que falte (no vuelve a revisar al reiniciar).
@@ -68,6 +89,16 @@ function setupUpdater(win) {
     setInterval(check, UPDATE_EVERY);
   }, wait);
 }
+
+ipcMain.handle('upd-check', () => {
+  if (!autoUpdater) { updSend('dev', 'Las actualizaciones solo funcionan en la app instalada.'); return false; }
+  markUpdateCheck();
+  autoUpdater.checkForUpdates().catch(() => {});
+  return true;
+});
+ipcMain.handle('upd-state', () => updState);
+ipcMain.handle('upd-releases', () =>
+  shell.openExternal('https://github.com/emasanta66-beep/iptv-player/releases'));
 
 const UPDATE_EVERY = 3 * 24 * 60 * 60 * 1000;
 const updateStamp = () => path.join(app.getPath('userData'), 'update-check.json');

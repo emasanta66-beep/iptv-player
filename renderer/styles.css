@@ -106,6 +106,17 @@ select, input[type=search], dialog input {
   transition: opacity .15s; }
 .epc:hover .rm { opacity: 1; }
 .epc .rm:hover { background: #c0392b; }
+.upd { display: flex; flex-direction: column; gap: 6px; margin-top: auto; padding-top: 10px;
+  border-top: 1px solid var(--line); }
+.upd .btn { width: 100%; }
+.upd .btn:disabled { opacity: .5; cursor: default; }
+.ver { color: var(--muted); font-size: 12px; }
+.updmsg { font-size: 12px; color: var(--muted); word-break: break-word; min-height: 16px; }
+.updmsg.ready, .updmsg.uptodate { color: #2ecc71; }
+.updmsg.error { color: #e67e22; }
+.updmsg.available, .updmsg.downloading { color: var(--accent2); }
+.linkbtn { background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0;
+  font: inherit; font-size: 12px; text-align: left; }
 .dlb { position: absolute; top: 6px; left: 6px; width: 28px; height: 28px; border: 0;
   border-radius: 50%; background: rgba(0,0,0,.6); color: #fff; cursor: pointer; z-index: 2; font-size: 13px; }
 .dlb:hover { background: var(--accent); }

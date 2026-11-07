@@ -1052,6 +1052,18 @@ $('#btnDel').addEventListener('click', () => {
   setTab(tab);
 });
 
+/* ===================== actualizaciones ===================== */
+function renderUpd(s) {
+  $('#verLbl').textContent = s.version ? 'Versión ' + s.version : '';
+  $('#updMsg').textContent = s.msg || '';
+  $('#updMsg').className = 'updmsg ' + (s.state || '');
+  $('#btnUpd').disabled = s.state === 'checking' || s.state === 'downloading';
+}
+$('#btnUpd').addEventListener('click', () => { window.iptv.updCheck(); });
+$('#btnRel').addEventListener('click', () => { window.iptv.updReleases(); });
+window.iptv.onUpdStatus(renderUpd);
+window.iptv.updState().then(renderUpd);
+
 /* ===================== inicio ===================== */
 window.iptv.onDlUpdate((list) => {
   dlList = list;
