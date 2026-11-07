@@ -21,5 +21,13 @@ jobs:
           node-version: 20
       - name: Instalar dependencias
         run: npm install
+      - name: Crear etiqueta de la versión
+        shell: bash
+        run: |
+          V=$(node -p "require('./package.json').version")
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag -f "v$V"
+          git push -f origin "v$V"
       - name: Crear instalador y publicar Release
         run: npm run publish
