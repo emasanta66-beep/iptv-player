@@ -589,6 +589,8 @@ function episodeDlItem(ep, group) {
   return {
     id: ep.key, kind: 'episode', group,
     title: `S${pad(ep.season)}E${pad(ep.num)} - ${cleanEpTitle(ep.title)}`,
+    img: ep.img || (viewSeries && viewSeries.logo) || '',
+    plot: ep.plot || '',
     url: ep.url, ext
   };
 }
@@ -600,7 +602,7 @@ function downloadEpisodes(eps) {
 
 function downloadItem(item) {
   if (!item || item.type !== 'movie') return;
-  queueDl([{ id: item.key, kind: 'movie', title: item.title, url: streamUrl(item), ext: item.ext || 'mp4' }]);
+  queueDl([{ id: item.key, kind: 'movie', title: item.title, img: item.logo || '', url: streamUrl(item), ext: item.ext || 'mp4' }]);
 }
 
 function queueDl(items) {
@@ -619,11 +621,24 @@ function playDownloaded(id) {
 
 const DL_LABEL = { queued: 'En cola', downloading: 'Descargando', paused: 'Pausada', done: 'Lista', error: 'Error' };
 function fmtMB(b) { return (b / 1048576).toFixed(1) + ' MB'; }
+function fmtMBs(bps) { return (bps / 1048576).toFixed(1) + ' MB/s'; }
+function fmtEta(sec) {
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return sec + ' s';
+  if (sec < 3600) return Math.round(sec / 60) + ' min';
+  return Math.floor(sec / 3600) + ' h ' + Math.round((sec % 3600) / 60) + ' min';
+}
 
 function dlRowHtml(j) {
+  const id = esc(j.id);
   const pct = j.status === 'done' ? 100 : (j.total ? Math.min(100, (j.received / j.total) * 100) : 0);
   const size = j.total ? `${fmtMB(j.received)} de ${fmtMB(j.total)}` : (j.received ? fmtMB(j.received) : '');
-  const id = esc(j.id);
+  const speed = j.status === 'downloading' && j.speed ? fmtMBs(j.speed) : '';
+  const eta = speed && j.total ? fmtEta((j.total - j.received) / j.speed) : '';
+  const parts = [size, (j.status !== 'done' && pct) ? Math.round(pct) + '%' : '', speed, eta ? 'quedan ' + eta : ''];
+  if (j.error) parts.push(j.error);
+  const meta = parts.filter(Boolean).map((x) => esc(x)).join(' · ');
+
   let btns;
   if (j.status === 'done') {
     btns = `<button class="btn primary" data-dlplay="${id}">▶ Reproducir</button>
@@ -635,15 +650,20 @@ function dlRowHtml(j) {
       : `<button class="btn primary" data-dla="resume" data-id="${id}">▶ Reanudar</button>`;
     btns += `<button class="btn" data-dla="cancel" data-id="${id}">Cancelar</button>`;
   }
-  const meta = [DL_LABEL[j.status] || j.status, size, (j.status !== 'done' && pct) ? Math.round(pct) + '%' : '', j.error]
-    .filter(Boolean).map((x) => esc(x)).join(' · ');
+  const thumbStyle = j.img ? `style="background-image:url('${esc(j.img)}')"` : '';
+  const playAttr = j.status === 'done' ? `data-dlplay="${id}" title="Reproducir"` : '';
   return `<div class="dlrow ${j.status}">
+    <div class="dlthumb ${j.kind === 'movie' ? 'poster' : ''}" ${thumbStyle} ${playAttr}>
+      <span class="dlstate">${esc(DL_LABEL[j.status] || j.status)}</span>
+    </div>
     <div class="dlinfo">
-      <div class="dltitle">${esc(j.group ? j.group + ' · ' : '')}${esc(j.title)}</div>
+      <div class="dlgroup">${esc(j.group || (j.kind === 'movie' ? 'Película' : ''))}</div>
+      <div class="dltitle">${esc(j.title)}</div>
+      ${j.plot ? `<div class="dlplot">${esc(j.plot)}</div>` : ''}
       <div class="dlbar"><div style="width:${pct}%"></div></div>
       <div class="dlmeta">${meta}</div>
+      <div class="row dlbtns">${btns}</div>
     </div>
-    <div class="row dlbtns">${btns}</div>
   </div>`;
 }
 

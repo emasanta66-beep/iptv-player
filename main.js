@@ -272,6 +272,7 @@ function dlEnqueue(items) {
     if (old && ['done', 'queued', 'downloading'].includes(old.status)) continue;
     const job = Object.assign({ createdAt: Date.now(), received: 0, total: 0 }, old || {}, {
       id: it.id, kind: it.kind, title: it.title, group: it.group || '',
+      img: it.img || '', plot: it.plot || '',
       url: it.url, file: dlFilePath(it), status: 'queued', error: ''
     });
     dlJobs.set(it.id, job);
@@ -310,6 +311,7 @@ function dlRun(job) {
       rt.done = true;
       dlLive.delete(job.id);
       try { job.received = fs.statSync(job.file).size; } catch (e) { job.received = 0; }
+      job.speed = 0;
       if (status) job.status = status;
       if (err) job.error = err;
       if (status === 'done') job.total = job.total || job.received;
@@ -374,9 +376,17 @@ function dlRun(job) {
             if (job.total && base + got < job.total) fail('Descarga incompleta, pulsa Reanudar');
             else finish('done');
           });
+          let sampleAt = Date.now();
+          let sampleBase = base;
           res.on('data', (c) => {
             got += c.length;
             job.received = base + got;
+            const now = Date.now();
+            if (now - sampleAt >= 1000) {
+              job.speed = (job.received - sampleBase) / ((now - sampleAt) / 1000);
+              sampleAt = now;
+              sampleBase = job.received;
+            }
             dlBroadcastSoon();
           });
           res.on('aborted', () => fail('Conexión cortada'));
