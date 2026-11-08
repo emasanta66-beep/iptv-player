@@ -468,7 +468,22 @@ function hideNextOverlay() {
 function showError(msg) {
   const el = $('#playerError');
   el.textContent = msg;
+  el.classList.remove('soft');
   el.classList.remove('hidden');
+}
+
+// Aviso discreto: no tapa el video ni bloquea los clics (p. ej. "Cargando subtítulo…")
+function showToast(msg) {
+  const el = $('#playerError');
+  el.textContent = msg;
+  el.classList.add('soft');
+  el.classList.remove('hidden');
+}
+
+function hideError() {
+  const el = $('#playerError');
+  el.classList.add('hidden');
+  el.classList.remove('soft');
 }
 
 function playMedia(m) {
@@ -481,7 +496,7 @@ function playMedia(m) {
   m.checked = false;
   current = m;
   hideNextOverlay();
-  $('#playerError').classList.add('hidden');
+  hideError();
   $('#playerWrap').classList.remove('hidden');
   $('#nowTitle').textContent = (m.seriesItem ? m.seriesItem.title + ' — ' : '') + m.title;
   $('#btnPrev').classList.toggle('hidden', !m.queue);
@@ -767,7 +782,7 @@ async function startTranscode(full, extra) {
       .filter((s) => s.url);
   }
   if (m.trackInfo) setSubTracks(m);
-  $('#playerError').classList.add('hidden');
+  hideError();
   hls = new window.Hls({ startPosition: 0, maxBufferLength: 30 });
   hls.on(window.Hls.Events.ERROR, (_e, d) => {
     if (d.fatal) showError('No se pudo reproducir. Prueba “Abrir en VLC”.');
@@ -1024,7 +1039,7 @@ video.addEventListener('timeupdate', () => saveProgress(false));
 video.addEventListener('pause', () => saveProgress(true));
 video.addEventListener('ended', onEnded);
 video.addEventListener('playing', () => {
-  if (current && current.transcoding) $('#playerError').classList.add('hidden');
+  if (current && current.transcoding) hideError();
   scheduleCheck();
 });
 video.addEventListener('error', () => {
@@ -1229,32 +1244,123 @@ function selectTrack(kind, i) {
   updateTrackIcon();
 }
 
-// Subtítulos extraídos por ffmpeg: se descargan al elegirlos (así traen todo lo ya procesado)
+// Subtítulos extraídos con ffmpeg aparte: los textos se van añadiendo a medida que llegan
+let subTimer = null;        // refresco mientras ffmpeg sigue escribiendo el .vtt
+let subSel = -1;            // pista de subtítulos elegida
+const subSeen = new Set();  // textos ya añadidos (evita duplicados)
+
+function stopSubRefresh() {
+  clearInterval(subTimer);
+  subTimer = null;
+}
+
+// Convierte un archivo .vtt en una lista de textos con sus tiempos
+function parseVtt(txt) {
+  const out = [];
+  const secs = (h, mm, ss, ms) => (h ? parseInt(h, 10) * 3600 : 0) + parseInt(mm, 10) * 60 + parseInt(ss, 10) +
+    (ms ? parseInt(String(ms).padEnd(3, '0'), 10) / 1000 : 0);
+  for (const block of String(txt).replace(/\r/g, '').split(/\n{2,}/)) {
+    const lines = block.split('\n').filter((l) => l.trim().length);
+    const k = lines.findIndex((l) => l.includes('-->'));
+    if (k < 0) continue;
+    const m = lines[k].match(/(?:(\d+):)?(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\s*-->\s*(?:(\d+):)?(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?/);
+    if (!m) continue;
+    const text = lines.slice(k + 1).join('\n').trim();
+    if (!text) continue;
+    out.push({ start: secs(m[1], m[2], m[3], m[4]), end: secs(m[5], m[6], m[7], m[8]), text });
+  }
+  return out;
+}
+
+// Descarga el .vtt y añade a la pista solo los textos nuevos. Devuelve true si ya hay alguno.
+async function addSubText(i, url) {
+  const tt = textTracksOf($('#video'))[i];
+  if (!tt) return false;
+  // mientras la pista está "disabled" el navegador no muestra su lista de textos
+  if (tt.mode !== 'showing') tt.mode = 'showing';
+  const r = await fetch(url + '?t=' + Date.now());
+  const txt = await r.text();
+  for (const c of parseVtt(txt)) {
+    const key = c.start + '|' + c.end + '|' + c.text;
+    if (subSeen.has(key)) continue;
+    subSeen.add(key);
+    try { tt.addCue(new VTTCue(c.start, c.end, c.text)); } catch (e) { /* nada */ }
+  }
+  return !!(tt.cues && tt.cues.length);
+}
+
 async function selectTextTrack(i) {
-  const v = $('#video');
   const m = current;
-  const tts = textTracksOf(v);
+  stopSubRefresh();
+  subSel = i;
+  const tts = textTracksOf($('#video'));
   tts.forEach((t, k) => { if (k !== i) t.mode = 'disabled'; });
   const s = m && m.trackInfo && m.trackInfo.subs && m.trackInfo.subs[i];
-  const el = v.querySelectorAll('track')[i];
-  if (i >= 0 && tts[i] && s && s.url && el) {
-    try {
-      const r = await fetch(s.url + '?t=' + Date.now());
-      const txt = await r.text();
-      if (current !== m) return;
-      if (el.dataset.blob) URL.revokeObjectURL(el.dataset.blob);
-      el.dataset.blob = URL.createObjectURL(new Blob([txt], { type: 'text/vtt' }));
-      el.src = el.dataset.blob;
-    } catch (e) { /* si falla, queda sin subtítulo */ }
+  if (i < 0 || !tts[i] || !s) { renderTrackMenu(); updateTrackIcon(); return; }
+
+  // empieza de cero con esta pista
+  subSeen.clear();
+  try {
+    if (tts[i].mode !== 'showing') tts[i].mode = 'showing';
+    for (const c of Array.from(tts[i].cues || [])) tts[i].removeCue(c);
+  } catch (e) { /* nada */ }
+
+  showToast('Cargando subtítulo…');
+  let url = s.url;
+  try {
+    const ex = await window.iptv.extractSub(s.i);
+    if (current !== m || subSel !== i) return;
+    if (!ex.ok) throw new Error(ex.error || 'no se pudo extraer');
+    url = ex.url;
+  } catch (e) {
+    showError('No se pudo cargar el subtítulo' + (e && e.message ? ': ' + e.message : ''));
+    renderTrackMenu();
+    updateTrackIcon();
+    return;
+  }
+
+  // espera a que ffmpeg escriba los primeros textos (suele ser casi inmediato)
+  let ok = false;
+  let fail = '';
+  for (let k = 0; k < 120 && !ok && !fail; k++) {
+    try { ok = await addSubText(i, url); } catch (e) { /* reintenta */ }
+    if (current !== m || subSel !== i) return;
+    if (ok) break;
+    let st = null;
+    try { st = await window.iptv.subStatus(s.i); } catch (e) { /* nada */ }
+    if (st && st.state === 'error') { fail = st.error || 'ffmpeg falló'; break; }
+    if (st && (st.state === 'done' || st.state === 'none')) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  if (current !== m || subSel !== i) return;
+
+  if (!ok) {
+    showError(fail ? ('No se pudo cargar el subtítulo: ' + fail) : 'Este subtítulo no tiene texto compatible.');
+    setTimeout(() => { if (current === m) hideError(); }, 3000);
+  } else {
     tts[i].mode = 'showing';
-  } else if (i >= 0 && tts[i]) {
-    tts[i].mode = 'showing';
+    hideError();
+    // ffmpeg sigue escribiendo el .vtt: se refresca hasta que termine
+    subTimer = setInterval(async () => {
+      if (current !== m || subSel !== i) { stopSubRefresh(); return; }
+      try { await addSubText(i, url); } catch (e) { /* nada */ }
+      let st = null;
+      try { st = await window.iptv.subStatus(s.i); } catch (e) { /* nada */ }
+      if (st && (st.state === 'done' || st.state === 'none')) stopSubRefresh();
+      if (st && st.state === 'error') {
+        stopSubRefresh();
+        showError('No se pudo cargar el subtítulo: ' + (st.error || ''));
+      }
+    }, 4000);
   }
   renderTrackMenu();
   updateTrackIcon();
 }
 
 function clearSubTracks() {
+  stopSubRefresh();
+  subSel = -1;
+  subSeen.clear();
   const v = $('#video');
   v.querySelectorAll('track').forEach((el) => {
     if (el.dataset.blob) URL.revokeObjectURL(el.dataset.blob);
@@ -1288,7 +1394,7 @@ async function loadAllTracks() {
   if ((info.audio || []).length < 2 && !subs.length) {
     m.trackInfo = { audio: info.audio || [], subs: [] };
     showError('Este video no trae otros audios ni subtítulos compatibles.');
-    setTimeout(() => { if (current === m) $('#playerError').classList.add('hidden'); }, 2500);
+    setTimeout(() => { if (current === m) hideError(); }, 2500);
     return;
   }
   m.trackInfo = { audio: info.audio || [], subs };

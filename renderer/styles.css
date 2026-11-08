@@ -42,6 +42,9 @@ select, input[type=search], dialog input {
   flex-direction: column; gap: 8px; max-width: 60%; }
 #playerError { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   text-align: center; padding: 20px; background: rgba(0,0,0,.75); color: var(--accent2); }
+/* aviso pequeño (cargando subtítulo): no tapa el video ni bloquea los clics */
+#playerError.soft { inset: auto 12px 12px auto; padding: 8px 12px; border-radius: 8px;
+  background: rgba(0,0,0,.72); font-size: 13px; pointer-events: none; }
 #playerSide { width: 320px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .now-title { font-size: 16px; font-weight: 600; }
 .auto { color: var(--muted); font-size: 13px; display: flex; gap: 6px; align-items: center; }

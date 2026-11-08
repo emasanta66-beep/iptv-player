@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('iptv', {
   transcodeStart: (url, opts) => ipcRenderer.invoke('transcode-start', url, opts),
   transcodeStop: () => ipcRenderer.invoke('transcode-stop'),
   probeTracks: (url) => ipcRenderer.invoke('probe-tracks', url),
+  extractSub: (i) => ipcRenderer.invoke('extract-sub', i),
+  subStatus: (i) => ipcRenderer.invoke('sub-status', i),
   dlEnqueue: (items) => ipcRenderer.invoke('dl-enqueue', items),
   dlAction: (action, id) => ipcRenderer.invoke('dl-action', action, id),
   dlList: () => ipcRenderer.invoke('dl-list'),

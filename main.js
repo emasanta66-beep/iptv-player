@@ -474,6 +474,8 @@ let hlsServer = null;
 let hlsPort = 0;
 let ffProc = null;
 let ffDir = null;
+let subProcs = new Set();   // procesos que extraen los subtítulos aparte
+let txInfo = null;          // datos de la conversión actual (para extraer subtítulos)
 
 function startHlsServer() {
   return new Promise((resolve, reject) => {
@@ -507,6 +509,11 @@ function stopTranscode() {
     try { ffProc.kill('SIGKILL'); } catch (e) { /* nada */ }
     ffProc = null;
   }
+  for (const p of subProcs) {
+    try { p.kill('SIGKILL'); } catch (e) { /* nada */ }
+  }
+  subProcs.clear();
+  txInfo = null;
   if (ffDir) {
     const d = ffDir;
     ffDir = null;
@@ -598,7 +605,8 @@ ipcMain.handle('transcode-start', async (_e, url, opts) => {
     const args = ['-hide_banner', '-loglevel', 'error',
       '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20',
       '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5'];
-    if (opts.start && opts.start > 1 && !opts.live) args.push('-ss', String(Math.floor(opts.start)));
+    const startArg = (opts.start && opts.start > 1 && !opts.live) ? Math.floor(opts.start) : 0;
+    if (startArg) args.push('-ss', String(startArg));
     // Con varios audios: todos van al HLS como pistas alternativas (el reproductor deja elegir)
     const multi = !opts.live && opts.audioCount > 1;
     const subIdx = (!opts.live && Array.isArray(opts.subs)) ? opts.subs.filter((n) => Number.isInteger(n) && n >= 0) : [];
@@ -619,8 +627,9 @@ ipcMain.handle('transcode-start', async (_e, url, opts) => {
     if (opts.live) args.push('-hls_list_size', '6', '-hls_flags', 'delete_segments');
     else args.push('-hls_list_size', '0', '-hls_playlist_type', 'event');
     args.push(path.join(dir, multi ? '%v.m3u8' : 'index.m3u8'));
-    // Subtítulos de texto: cada uno sale como archivo .vtt en la misma pasada
-    for (const s of subIdx) args.push('-map', '0:s:' + s, '-c:s', 'webvtt', '-f', 'webvtt', path.join(dir, 'sub' + s + '.vtt'));
+    // Los subtítulos NO van en esta misma pasada: ffmpeg escribe el .vtt recién al
+    // terminar, así que durante la reproducción el archivo estaría vacío. Se extraen
+    // aparte con "extract-sub" (ver extractSubtitle).
 
     let stderr = '';
     let exited = null;
@@ -638,6 +647,10 @@ ipcMain.handle('transcode-start', async (_e, url, opts) => {
     const t0 = Date.now();
     while (Date.now() - t0 < 30000) {
       if (fs.existsSync(playlist) && readyFiles.every(hasTs)) {
+        txInfo = {
+          src: url, start: startArg, dir, port, id, subIdx,
+          jobs: new Map(), done: new Set(), errors: new Map()
+        };
         return {
           ok: true,
           url: `http://127.0.0.1:${port}/${id}/index.m3u8`,
@@ -657,4 +670,57 @@ ipcMain.handle('transcode-start', async (_e, url, opts) => {
   } catch (err) {
     return { ok: false, error: String(err && err.message || err) };
   }
+});
+
+// Extrae un subtítulo a .vtt con un ffmpeg aparte, para que los textos se puedan
+// ver mientras el video todavía se está convirtiendo (con -flush_packets van
+// apareciendo a medida que se leen, no todos al final).
+function subUrlOf(tx, i) {
+  return `http://127.0.0.1:${tx.port}/${tx.id}/sub${i}.vtt`;
+}
+
+function extractSubtitle(i) {
+  const tx = txInfo;
+  if (!tx || !tx.subIdx.includes(i)) return { ok: false, error: 'No hay una conversión activa' };
+  if (tx.done.has(i) || tx.jobs.has(i)) return { ok: true, url: subUrlOf(tx, i) };
+  tx.errors.delete(i);
+  const file = path.join(tx.dir, 'sub' + i + '.vtt');
+  const args = ['-hide_banner', '-loglevel', 'error',
+    '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20',
+    '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5'];
+  if (tx.start > 1) args.push('-ss', String(tx.start));
+  args.push('-i', tx.src, '-map', '0:s:' + i, '-c:s', 'webvtt', '-flush_packets', '1', '-f', 'webvtt', file);
+  let proc;
+  try {
+    proc = spawn(resolveFfmpeg(), args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  } catch (e) {
+    return { ok: false, error: String(e && e.message || e) };
+  }
+  const job = { error: '' };
+  tx.jobs.set(i, job);
+  subProcs.add(proc);
+  proc.stderr.on('data', (d) => { job.error = (job.error + d.toString()).slice(-800); });
+  proc.on('error', (e) => {
+    subProcs.delete(proc);
+    tx.jobs.delete(i);
+    tx.errors.set(i, String(e && e.message || e));
+  });
+  proc.on('exit', (code) => {
+    subProcs.delete(proc);
+    tx.jobs.delete(i);
+    if (code === 0) tx.done.add(i);
+    else tx.errors.set(i, job.error.trim().split('\n').pop() || ('ffmpeg terminó con código ' + code));
+  });
+  return { ok: true, url: subUrlOf(tx, i) };
+}
+
+ipcMain.handle('extract-sub', (_e, i) => extractSubtitle(i));
+
+ipcMain.handle('sub-status', (_e, i) => {
+  const tx = txInfo;
+  if (!tx || !tx.subIdx.includes(i)) return { state: 'none' };
+  if (tx.done.has(i)) return { state: 'done' };
+  if (tx.jobs.has(i)) return { state: 'working' };
+  if (tx.errors.has(i)) return { state: 'error', error: tx.errors.get(i) };
+  return { state: 'idle' };
 });
