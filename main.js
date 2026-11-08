@@ -484,9 +484,10 @@ function startHlsServer() {
       const file = path.join(HLS_ROOT, m[1], path.basename(m[2]));
       fs.readFile(file, (err, data) => {
         if (err) { res.writeHead(404); return res.end(); }
-        const isPl = file.endsWith('.m3u8');
+        const ct = file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl'
+          : file.endsWith('.vtt') ? 'text/vtt; charset=utf-8' : 'video/mp2t';
         res.writeHead(200, {
-          'Content-Type': isPl ? 'application/vnd.apple.mpegurl' : 'video/mp2t',
+          'Content-Type': ct,
           'Cache-Control': 'no-cache',
           'Access-Control-Allow-Origin': '*'
         });
@@ -525,6 +526,65 @@ function resolveFfmpeg() {
 
 ipcMain.handle('transcode-stop', () => { stopTranscode(); return true; });
 
+/* ===================== pistas de audio y subtítulos del video ===================== */
+const LANG_NAMES = {
+  spa: 'Español', es: 'Español', eng: 'Inglés', en: 'Inglés', por: 'Portugués', pt: 'Portugués',
+  fra: 'Francés', fre: 'Francés', fr: 'Francés', ita: 'Italiano', it: 'Italiano', deu: 'Alemán', ger: 'Alemán',
+  de: 'Alemán', jpn: 'Japonés', ja: 'Japonés', kor: 'Coreano', ko: 'Coreano', zho: 'Chino', chi: 'Chino',
+  rus: 'Ruso', ru: 'Ruso', lat: 'Latino'
+};
+// Subtítulos de texto que ffmpeg sabe convertir a WebVTT (los de imagen, como PGS, no)
+const TEXT_SUBS = new Set(['subrip', 'srt', 'ass', 'ssa', 'mov_text', 'webvtt', 'text']);
+
+function trackLabel(t, kind, n) {
+  const lang = LANG_NAMES[t.lang] || '';
+  const title = t.title || '';
+  if (title && lang && !title.toLowerCase().includes(lang.toLowerCase())) return lang + ' – ' + title;
+  return title || lang || t.lang || (kind + ' ' + n);
+}
+
+function parseProbe(txt) {
+  const out = { audio: [], subs: [] };
+  let last = null;
+  for (const line of String(txt).split(/\r?\n/)) {
+    const mm = line.match(/^\s*Stream #0:\d+(?:\[[^\]]*\])?(?:\(([^)]*)\))?[^:]*: (Video|Audio|Subtitle|Data|Attachment): ?(\w+)?/);
+    if (mm) {
+      last = null;
+      const lang = (mm[1] || '').toLowerCase();
+      const codec = (mm[3] || '').toLowerCase();
+      if (mm[2] === 'Audio') {
+        last = { i: out.audio.length, lang, codec, title: '' };
+        out.audio.push(last);
+      } else if (mm[2] === 'Subtitle') {
+        last = { i: out.subs.length, lang, codec, title: '', text: TEXT_SUBS.has(codec) };
+        out.subs.push(last);
+      }
+      continue;
+    }
+    const t = last && line.match(/^\s+title\s*:\s*(.+)$/i);
+    if (t) last.title = t[1].trim();
+  }
+  out.audio.forEach((t, n) => { t.label = trackLabel(t, 'Audio', n + 1); });
+  out.subs.forEach((t, n) => { t.label = trackLabel(t, 'Subtítulo', n + 1); });
+  return out;
+}
+
+// Lee solo la cabecera del video con ffmpeg (no lo descarga entero)
+ipcMain.handle('probe-tracks', (_e, url) => new Promise((resolve) => {
+  let err = '';
+  let done = false;
+  let proc = null;
+  const finish = () => { if (done) return; done = true; clearTimeout(timer); resolve(parseProbe(err)); };
+  const timer = setTimeout(() => { try { proc && proc.kill('SIGKILL'); } catch (e) { /* nada */ } finish(); }, 30000);
+  try {
+    proc = spawn(resolveFfmpeg(), ['-hide_banner', '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20', '-i', url],
+      { stdio: ['ignore', 'ignore', 'pipe'] });
+    proc.stderr.on('data', (d) => { if (err.length < 300000) err += d.toString(); });
+    proc.on('error', () => { err = ''; finish(); });
+    proc.on('exit', finish);
+  } catch (e) { err = ''; finish(); }
+}));
+
 ipcMain.handle('transcode-start', async (_e, url, opts) => {
   opts = opts || {};
   stopTranscode();
@@ -539,15 +599,28 @@ ipcMain.handle('transcode-start', async (_e, url, opts) => {
       '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20',
       '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5'];
     if (opts.start && opts.start > 1 && !opts.live) args.push('-ss', String(Math.floor(opts.start)));
-    args.push('-i', url, '-map', '0:v:0?', '-map', '0:a:0?');
+    // Con varios audios: todos van al HLS como pistas alternativas (el reproductor deja elegir)
+    const multi = !opts.live && opts.audioCount > 1;
+    const subIdx = (!opts.live && Array.isArray(opts.subs)) ? opts.subs.filter((n) => Number.isInteger(n) && n >= 0) : [];
+    args.push('-i', url, '-map', '0:v:0?');
+    if (multi) for (let k = 0; k < opts.audioCount; k++) args.push('-map', '0:a:' + k);
+    else args.push('-map', '0:a:0?');
     if (opts.full) args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p');
     else args.push('-c:v', 'copy');
-    args.push('-c:a', 'aac', '-ac', '2', '-b:a', '192k',
-      '-f', 'hls', '-hls_time', '4',
-      '-hls_segment_filename', path.join(dir, 'seg%05d.ts'));
+    args.push('-c:a', 'aac', '-ac', '2', '-b:a', '192k', '-f', 'hls', '-hls_time', '4');
+    if (multi) {
+      const vm = ['v:0,agroup:aud,name:video'];
+      for (let k = 0; k < opts.audioCount; k++) vm.push('a:' + k + ',agroup:aud,name:audio' + k + (k === 0 ? ',default:yes' : ''));
+      args.push('-master_pl_name', 'index.m3u8', '-var_stream_map', vm.join(' '),
+        '-hls_segment_filename', path.join(dir, '%v_%05d.ts'));
+    } else {
+      args.push('-hls_segment_filename', path.join(dir, 'seg%05d.ts'));
+    }
     if (opts.live) args.push('-hls_list_size', '6', '-hls_flags', 'delete_segments');
     else args.push('-hls_list_size', '0', '-hls_playlist_type', 'event');
-    args.push(path.join(dir, 'index.m3u8'));
+    args.push(path.join(dir, multi ? '%v.m3u8' : 'index.m3u8'));
+    // Subtítulos de texto: cada uno sale como archivo .vtt en la misma pasada
+    for (const s of subIdx) args.push('-map', '0:s:' + s, '-c:s', 'webvtt', '-f', 'webvtt', path.join(dir, 'sub' + s + '.vtt'));
 
     let stderr = '';
     let exited = null;
@@ -558,13 +631,18 @@ ipcMain.handle('transcode-start', async (_e, url, opts) => {
     proc.on('exit', (code) => { exited = 'code:' + code; });
 
     const playlist = path.join(dir, 'index.m3u8');
+    const hasTs = (f) => { try { return fs.readFileSync(f, 'utf8').includes('.ts'); } catch (e) { return false; } };
+    const readyFiles = multi
+      ? [path.join(dir, 'video.m3u8')].concat(Array.from({ length: opts.audioCount }, (_v, k) => path.join(dir, 'audio' + k + '.m3u8')))
+      : [playlist];
     const t0 = Date.now();
     while (Date.now() - t0 < 30000) {
-      if (fs.existsSync(playlist)) {
-        const txt = fs.readFileSync(playlist, 'utf8');
-        if (txt.includes('.ts')) {
-          return { ok: true, url: `http://127.0.0.1:${port}/${id}/index.m3u8` };
-        }
+      if (fs.existsSync(playlist) && readyFiles.every(hasTs)) {
+        return {
+          ok: true,
+          url: `http://127.0.0.1:${port}/${id}/index.m3u8`,
+          subs: subIdx.map((s) => ({ i: s, url: `http://127.0.0.1:${port}/${id}/sub${s}.vtt` }))
+        };
       }
       if (exited && exited.startsWith('error:')) {
         return { ok: false, error: 'No se pudo ejecutar ffmpeg. Ejecuta "npm install" de nuevo en la carpeta del proyecto.' };
