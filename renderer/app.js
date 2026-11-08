@@ -489,6 +489,7 @@ function playMedia(m) {
   $('#btnFavNow').classList.toggle('hidden', !!m.queue || !m.item);
   updateFavNow();
   destroyHls();
+  clearSubTracks();
   // al avanzar de capítulo, mostrar su temporada y resaltarlo en la lista
   if (viewSeries && m.seriesItem === viewSeries && m.queue && m.queue[m.index]) {
     viewSeason = m.queue[m.index].season;
@@ -737,11 +738,14 @@ function scheduleCheck() {
   }, 4000);
 }
 
-async function startTranscode(full) {
+async function startTranscode(full, extra) {
   const m = current;
   if (!m || m.converting) return;
   const v = $('#video');
   if (!window.Hls) { showError('Falta hls.js: ejecuta "npm install" en la carpeta del proyecto.'); return; }
+  if (extra) m.lastExtra = extra;
+  else extra = m.lastExtra;
+  m.fullMode = !!full;
   m.converting = true;
   const pos = m.type === 'live' ? 0 : (m.tOffset || 0) + (v.currentTime || 0);
   if (!m.knownD && !m.transcoding && isFinite(v.duration) && v.duration > 0) m.knownD = v.duration;
@@ -752,11 +756,17 @@ async function startTranscode(full) {
   v.removeAttribute('src');
   v.load();
   showError(full ? 'Convirtiendo video y audio para reproducirlo…' : 'Preparando audio compatible…');
-  const r = await window.iptv.transcodeStart(m.url, { start: pos, full, live: m.type === 'live' });
+  const r = await window.iptv.transcodeStart(m.url, Object.assign({ start: pos, full, live: m.type === 'live' }, extra || {}));
   if (current !== m) return;
   if (!r.ok) { showError(r.error || 'No se pudo convertir el video'); return; }
   m.transcoding = true;
   m.tOffset = pos > 1 ? Math.floor(pos) : 0;
+  if (m.trackInfo && r.subs) {
+    // une cada archivo .vtt con la información de su pista (nombre, idioma)
+    m.trackInfo.subs = m.trackInfo.subs.map((s) => Object.assign({}, s, { url: (r.subs.find((x) => x.i === s.i) || {}).url }))
+      .filter((s) => s.url);
+  }
+  if (m.trackInfo) setSubTracks(m);
   $('#playerError').classList.add('hidden');
   hls = new window.Hls({ startPosition: 0, maxBufferLength: 30 });
   hls.on(window.Hls.Events.ERROR, (_e, d) => {
@@ -1156,11 +1166,20 @@ function trackList() {
   const v = $('#video');
   const out = { audio: [], subs: [] };
   if (hls) {
+    const info = current && current.trackInfo;
     (hls.audioTracks || []).forEach((t, i) => out.audio.push({
-      i, label: t.name || t.lang || ('Audio ' + (i + 1)), active: hls.audioTrack === i
+      i, label: (info && info.audio[i] && info.audio[i].label) || t.name || t.lang || ('Audio ' + (i + 1)),
+      active: hls.audioTrack === i
     }));
-    (hls.subtitleTracks || []).forEach((t, i) => out.subs.push({
-      i, label: t.name || t.lang || ('Subtítulo ' + (i + 1)), active: hls.subtitleTrack === i
+    if ((hls.subtitleTracks || []).length) {
+      hls.subtitleTracks.forEach((t, i) => out.subs.push({
+        i, label: t.name || t.lang || ('Subtítulo ' + (i + 1)), active: hls.subtitleTrack === i
+      }));
+      return out;
+    }
+    // subtítulos que ffmpeg extrajo del video (pistas de texto del propio <video>)
+    textTracksOf(v).forEach((t, i) => out.subs.push({
+      i, label: t.label || t.language || ('Subtítulo ' + (i + 1)), active: t.mode === 'showing'
     }));
     return out;
   }
@@ -1180,27 +1199,105 @@ function renderTrackMenu() {
   const { audio, subs } = trackList();
   const row = (kind, t) => `<button class="tm ${t.active ? 'on' : ''}" data-kind="${kind}" data-i="${t.i}">${t.active ? '✓ ' : ''}${esc(t.label)}</button>`;
   let html = '<div class="tmh">Audio</div>';
-  html += audio.length ? audio.map((t) => row('audio', t)).join('')
-    : '<div class="tmn">Este video no tiene otras pistas de audio</div>';
+  // El reproductor integrado no ve todas las pistas de un video (p. ej. .mkv): se pueden buscar con ffmpeg
+  const canLoad = !!current && current.type !== 'live' && !current.trackInfo && /^https?:/i.test(current.url || '');
+  if (audio.length) html += audio.map((t) => row('audio', t)).join('');
+  else if (!canLoad) html += '<div class="tmn">Este video no tiene otras pistas de audio</div>';
   html += '<div class="tmh">Subtítulos</div>';
   html += `<button class="tm ${subs.some((s) => s.active) ? '' : 'on'}" data-kind="sub" data-i="-1">Desactivados</button>`;
   html += subs.map((t) => row('sub', t)).join('');
-  if (!subs.length) html += '<div class="tmn">Este video no trae subtítulos</div>';
+  if (!subs.length && !canLoad) html += '<div class="tmn">Este video no trae subtítulos</div>';
+  if (canLoad) html += '<button class="tm" data-kind="load" data-i="0">🔍 Buscar todos los audios y subtítulos</button>';
   $('#trackMenu').innerHTML = html;
 }
 
 function selectTrack(kind, i) {
+  if (kind === 'load') { loadAllTracks(); return; }
   const v = $('#video');
-  if (hls) {
-    if (kind === 'audio') hls.audioTrack = i;
-    else { hls.subtitleDisplay = i >= 0; hls.subtitleTrack = i; }
+  const hlsSubs = !!hls && (hls.subtitleTracks || []).length > 0;
+  if (hls && kind === 'audio') {
+    hls.audioTrack = i;
+  } else if (hls && hlsSubs) {
+    hls.subtitleDisplay = i >= 0; hls.subtitleTrack = i;
   } else if (kind === 'audio') {
     if (v.audioTracks) for (let k = 0; k < v.audioTracks.length; k++) v.audioTracks[k].enabled = (k === i);
   } else {
-    textTracksOf(v).forEach((t, k) => { t.mode = (k === i ? 'showing' : 'disabled'); });
+    selectTextTrack(i);
+    return;
   }
   renderTrackMenu();
   updateTrackIcon();
+}
+
+// Subtítulos extraídos por ffmpeg: se descargan al elegirlos (así traen todo lo ya procesado)
+async function selectTextTrack(i) {
+  const v = $('#video');
+  const m = current;
+  const tts = textTracksOf(v);
+  tts.forEach((t, k) => { if (k !== i) t.mode = 'disabled'; });
+  const s = m && m.trackInfo && m.trackInfo.subs && m.trackInfo.subs[i];
+  const el = v.querySelectorAll('track')[i];
+  if (i >= 0 && tts[i] && s && s.url && el) {
+    try {
+      const r = await fetch(s.url + '?t=' + Date.now());
+      const txt = await r.text();
+      if (current !== m) return;
+      if (el.dataset.blob) URL.revokeObjectURL(el.dataset.blob);
+      el.dataset.blob = URL.createObjectURL(new Blob([txt], { type: 'text/vtt' }));
+      el.src = el.dataset.blob;
+    } catch (e) { /* si falla, queda sin subtítulo */ }
+    tts[i].mode = 'showing';
+  } else if (i >= 0 && tts[i]) {
+    tts[i].mode = 'showing';
+  }
+  renderTrackMenu();
+  updateTrackIcon();
+}
+
+function clearSubTracks() {
+  const v = $('#video');
+  v.querySelectorAll('track').forEach((el) => {
+    if (el.dataset.blob) URL.revokeObjectURL(el.dataset.blob);
+    el.remove();
+  });
+}
+
+function setSubTracks(m) {
+  clearSubTracks();
+  const v = $('#video');
+  ((m.trackInfo && m.trackInfo.subs) || []).forEach((s) => {
+    const el = document.createElement('track');
+    el.kind = 'subtitles';
+    el.label = s.label;
+    if (s.lang) el.srclang = s.lang.slice(0, 2);
+    v.appendChild(el);
+    if (el.track) el.track.mode = 'disabled';
+  });
+}
+
+// Busca con ffmpeg todos los audios y subtítulos del video y lo reproduce con ellos disponibles
+async function loadAllTracks() {
+  const m = current;
+  if (!m || m.type === 'live' || !/^https?:/i.test(m.url || '')) return;
+  closeMenus();
+  showError('Buscando audios y subtítulos…');
+  let info = { audio: [], subs: [] };
+  try { info = await window.iptv.probeTracks(m.url); } catch (e) { /* nada */ }
+  if (current !== m) return;
+  const subs = (info.subs || []).filter((s) => s.text);
+  if ((info.audio || []).length < 2 && !subs.length) {
+    m.trackInfo = { audio: info.audio || [], subs: [] };
+    showError('Este video no trae otros audios ni subtítulos compatibles.');
+    setTimeout(() => { if (current === m) $('#playerError').classList.add('hidden'); }, 2500);
+    return;
+  }
+  m.trackInfo = { audio: info.audio || [], subs };
+  m.converting = false;
+  await startTranscode(!!m.fullMode, {
+    audioCount: (info.audio || []).length,
+    subs: subs.map((s) => s.i)
+  });
+  if (!m.transcoding && current === m) m.trackInfo = null;   // si falló, permite volver a intentarlo
 }
 
 /* ===================== reproductor: barra de controles ===================== */
