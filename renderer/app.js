@@ -33,11 +33,12 @@ function save() {
 }
 
 /* ===================== estado en memoria ===================== */
-let tab = 'live';
+let tab = 'home';
 let query = '';
 let curCat = 'all';
 let limit = 200;
 let viewSeries = null;           // serie abierta (vista de episodios)
+let viewMovie = null;            // película abierta en su ficha
 let viewSeason = 1;              // temporada mostrada
 const cache = {};                // por lista: {live,movie,series,cats,epgUrl}
 const xmltvCache = {};           // url -> texto
@@ -45,6 +46,7 @@ let current = null;              // reproducción actual
 let hls = null;
 let countdownTimer = null;
 let lastSave = 0;
+let ignoredPauseEvents = 0;
 let checkTimer = null;           // detección de audio/video no compatible
 let dlList = [];                 // descargas (las actualiza el proceso principal)
 
@@ -79,7 +81,12 @@ function parseM3U(text, pid) {
       const attrs = {};
       line.replace(/([\w-]+)="([^"]*)"/g, (_m, k, v) => { attrs[k.toLowerCase()] = v; return ''; });
       const title = (line.slice(line.lastIndexOf(',') + 1).trim()) || attrs['tvg-name'] || 'Sin nombre';
-      cur = { title, logo: attrs['tvg-logo'] || '', group: attrs['group-title'] || 'Sin categoría', epgId: attrs['tvg-id'] || '' };
+      cur = {
+        title, logo: attrs['tvg-logo'] || '', group: attrs['group-title'] || 'Sin categoría',
+        epgId: attrs['tvg-id'] || '', tvgName: attrs['tvg-name'] || '',
+        catchup: attrs.catchup || '', catchupDays: Number(attrs['catchup-days'] || attrs['tvg-rec'] || attrs.timeshift) || 0,
+        catchupSource: attrs['catchup-source'] || '', timeshift: attrs.timeshift || ''
+      };
     } else if (!line.startsWith('#') && cur) {
       cur.url = line;
       const se = cur.title.match(/^(.*?)[\s._-]*S(\d{1,2})\s?E(\d{1,3})/i);
@@ -102,7 +109,9 @@ function parseM3U(text, pid) {
       } else {
         const item = {
           key: `${pid}:${type}:${hash(cur.url + cur.title)}`, pid, type,
-          title: cur.title, logo: cur.logo, cat: cur.group, url: cur.url, epgId: cur.epgId
+          title: cur.title, logo: cur.logo, cat: cur.group, url: cur.url, epgId: cur.epgId,
+          tvgName: cur.tvgName, catchup: cur.catchup, catchupDays: cur.catchupDays,
+          catchupSource: cur.catchupSource, timeshift: cur.timeshift
         };
         out[type].push(item);
         out.cats[type][cur.group] = cur.group;
@@ -179,7 +188,9 @@ async function ensureCategory(tabName, catId) {
       key: `${p.id}:${tabName}:${id}`, pid: p.id, type: tabName,
       title: String(r.name || '?'), logo: r.stream_icon || r.cover || '',
       cat: String(r.category_id), id, ext: r.container_extension || '',
-      epgId: r.epg_channel_id || ''
+      epgId: r.epg_channel_id || '', added: Number(r.added) || 0,
+      tvArchive: Number(r.tv_archive) === 1,
+      archiveDays: Number(r.tv_archive_duration) || 0
     };
   });
   if (catId === 'all') {
@@ -191,6 +202,35 @@ async function ensureCategory(tabName, catId) {
     c.byCat[tabName] = c.byCat[tabName] || {};
     c.byCat[tabName][catId] = true;
   }
+}
+
+const CATALOG_CACHE_TTL = 6 * 60 * 60 * 1000;
+function catalogCacheSnapshot(c) {
+  const fields = ['key', 'pid', 'type', 'title', 'logo', 'cat', 'id', 'ext', 'epgId', 'added', 'tvArchive', 'archiveDays'];
+  const pickItems = (items) => (items || []).map((item) => {
+    const copy = {};
+    fields.forEach((field) => { if (item[field] != null) copy[field] = item[field]; });
+    return copy;
+  });
+  return {
+    version: 1, savedAt: Date.now(),
+    cats: { movie: Object.assign({}, c.cats?.movie || {}), series: Object.assign({}, c.cats?.series || {}) },
+    movie: pickItems(c.movie), series: pickItems(c.series)
+  };
+}
+
+function restoreCatalogCache(pid, saved) {
+  if (!saved || saved.version !== 1 || !Array.isArray(saved.movie) || !Array.isArray(saved.series)) return null;
+  const c = cache[pid] || {};
+  Object.assign(c, {
+    cats: { live: {}, movie: saved.cats?.movie || {}, series: saved.cats?.series || {} },
+    catsLoaded: { movie: true, series: true },
+    loaded: { movie: true, series: true },
+    byCat: { movie: {}, series: {} },
+    movie: saved.movie, series: saved.series
+  });
+  cache[pid] = c;
+  return c;
 }
 
 // Primera categoría según el orden de la lista (el que el usuario eligió con “Ordenar”)
@@ -260,7 +300,7 @@ function render() {
   const p = activePl();
   $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   more.classList.add('hidden');
-  $('#toolbar').classList.toggle('hidden', tab === 'continue' || tab === 'downloads' || !!viewSeries);
+  $('#toolbar').classList.toggle('hidden', tab === 'continue' || tab === 'downloads' || !!viewSeries || !!viewMovie);
   if (tab === 'downloads') { crumb.classList.add('hidden'); renderDownloads(); return; }
 
   if (!p) {
@@ -270,8 +310,11 @@ function render() {
   }
 
   if (viewSeries) { renderEpisodes(); return; }
+  if (viewMovie) { renderMovieDetail(); return; }
   crumb.classList.add('hidden');
+  crumb.classList.remove('movie-crumb');
   fillCategories();
+  if (tab === 'home') { renderHome(); return; }
 
   if (tab === 'continue') { renderContinue(); return; }
 
@@ -283,6 +326,121 @@ function render() {
     : '<p class="muted">No hay elementos.</p>';
   more.classList.toggle('hidden', all.length <= limit);
   setStatus(`${all.length} elementos`);
+}
+
+function resumeEntries(includeDone = false) {
+  const p = activePl();
+  const seen = new Set();
+  return Object.values(S.progress)
+    .filter((e) => p && e.pid === p.id && (includeDone || !e.done) && !e.hidden)
+    .sort((a, b) => b.updated - a.updated)
+    .filter((e) => {
+      const key = e.seriesRef ? 's:' + e.seriesRef.key : e.key;
+      if (seen.has(key)) return false;
+      seen.add(key); return true;
+    });
+}
+
+function renderHome() {
+  const p = activePl();
+  const c = cache[p.id] || {};
+  const recentMovies = [...(c.movie || [])].sort((a, b) => (b.added || 0) - (a.added || 0)).slice(0, 5);
+  const recentSeries = [...(c.series || [])].sort((a, b) => (b.added || 0) - (a.added || 0)).slice(0, 5);
+  const continueList = resumeEntries();
+  const feature = resumeEntries(true)[0] || continueList[0];
+  const featureItem = feature && (feature.itemRef || feature.seriesRef);
+  if (featureItem && featureItem.id == null) {
+    const catalogItem = [...(c.movie || []), ...(c.series || [])].find((x) => x.key === featureItem.key);
+    if (catalogItem) Object.assign(featureItem, { id: catalogItem.id, type: catalogItem.type });
+  }
+  if (feature && !feature.plot && featureItem && !featureItem.plot && featureItem.id != null && !feature.loadingPlot) {
+    feature.loadingPlot = true;
+    const detailAction = featureItem.type === 'series' ? 'get_series_info' : 'get_vod_info';
+    const idParam = featureItem.type === 'series' ? 'series_id' : 'vod_id';
+    api(p, detailAction, `&${idParam}=${enc(featureItem.id)}`).then((data) => {
+      const info = data && data.info && !Array.isArray(data.info) ? data.info : {};
+      feature.plot = info.plot || '';
+      featureItem.plot = feature.plot;
+      if (S.progress[feature.key]) {
+        S.progress[feature.key].plot = feature.plot;
+        if (S.progress[feature.key].itemRef) S.progress[feature.key].itemRef.plot = feature.plot;
+        if (S.progress[feature.key].seriesRef) S.progress[feature.key].seriesRef.plot = feature.plot;
+        save();
+      }
+      if (tab === 'home') renderHome();
+    }).catch(() => { feature.loadingPlot = false; });
+  }
+  const featureImg = (feature && feature.img) || (featureItem && featureItem.logo) || '';
+  const featureTitle = featureItem ? featureItem.title : (feature && feature.title) || '';
+  const featureAction = feature ? `<button class="btn primary" data-cont="${esc(feature.key)}">▶ ${feature.done ? 'Ver de nuevo' : 'Continuar viendo'}</button>` :
+    '<span class="home-hint">Elige una película o serie para empezar</span>';
+  const shelf = (title, items, empty) => `<section class="home-shelf"><div class="home-shelf-head"><h2>${title}</h2><span>${items.length ? items.length + ' títulos' : ''}</span></div><div class="home-recent-grid">${items.length ? items.map(cardHtml).join('') : `<p class="muted">${empty}</p>`}</div></section>`;
+  const continueCards = continueList.map((e) => {
+    const item = e.itemRef || e.seriesRef || {};
+    const img = e.img || item.logo || '';
+    const pct = e.d ? Math.min(100, (e.t / e.d) * 100) : 0;
+    return `<div class="home-resume" data-cont="${esc(e.key)}"><div class="home-resume-art" ${img ? `style="background-image:url('${esc(img)}')"` : ''}><span>▶</span><i style="width:${pct}%"></i></div><b>${esc(item.title || e.title)}</b><small>${e.d ? fmtTime(Math.max(0, e.d - e.t)) + ' restantes' : 'Continuar'}</small></div>`;
+  }).join('');
+  const searchText = query.trim().toLowerCase();
+  const filter = (arr) => searchText ? arr.filter((x) => x.title.toLowerCase().includes(searchText)) : arr;
+  const moviesFiltered = filter(recentMovies), seriesFiltered = filter(recentSeries);
+  const grid = $('#grid');
+  grid.className = 'dashboard';
+  grid.innerHTML = `<section class="home-hero" ${featureImg ? `style="--hero-image:url('${esc(featureImg)}')"` : ''}>
+      <div class="home-hero-copy"><span class="home-eyebrow">TU BIBLIOTECA</span><h1>${feature ? 'Vuelve a tu historia' : '¿Qué vemos hoy?'}</h1>
+      <p>${feature ? esc(feature.plot || feature.itemRef?.plot || feature.seriesRef?.plot || 'Retoma donde lo dejaste y descubre qué pasa después.') : `Hola, ${esc(p.name || 'bienvenido')}. Explora tus películas y series.`}</p>${featureAction}</div>
+    </section>
+    <section class="home-shelf home-continue-section"><div class="home-shelf-head"><h2>Continuar viendo</h2><span>${continueList.length} títulos</span></div><div class="home-resume-rail">${continueCards || '<p class="muted">Aquí aparecerán las películas y series que dejes a medias.</p>'}</div></section>
+    ${shelf('Películas agregadas recientemente', moviesFiltered, 'No hay películas disponibles.')}
+    ${shelf('Series agregadas recientemente', seriesFiltered, 'No hay series disponibles.')}`;
+  setStatus(`${continueList.length} por continuar · ${recentMovies.length} películas · ${recentSeries.length} series`);
+}
+
+function openMovie(item) {
+  // Compatibilidad con elementos quitados por versiones anteriores, que solo los ocultaban.
+  if (S.progress[item.key]?.hidden) {
+    delete S.progress[item.key];
+    save();
+  }
+  viewMovie = item;
+  render();
+  const p = activePl();
+  if (!p || p.type !== 'xtream' || item.id == null || item.detailLoaded) return;
+  api(p, 'get_vod_info', `&vod_id=${enc(item.id)}`).then((data) => {
+    if (viewMovie !== item) return;
+    const info = data && data.info && !Array.isArray(data.info) ? data.info : {};
+    item.plot = info.plot || item.plot || '';
+    item.releaseDate = info.releasedate || info.releaseDate || item.releaseDate || '';
+    item.rating = info.rating || item.rating || '';
+    item.cast = info.cast || item.cast || '';
+    item.detailLoaded = true;
+    renderMovieDetail();
+  }).catch(() => { item.detailLoaded = true; });
+}
+
+function renderMovieDetail() {
+  const item = viewMovie;
+  if (!item) return;
+  const crumb = $('#crumb');
+  crumb.classList.add('movie-crumb');
+  crumb.classList.remove('hidden');
+  const catName = (((cache[item.pid] || {}).cats || {}).movie || {})[item.cat] || '';
+  const year = (item.releaseDate || (item.title.match(/\b(19|20)\d{2}\b/) || [])[0] || '').slice(0, 4);
+  const progress = S.progress[item.key];
+  const resumable = progress && !progress.hidden && !progress.done && progress.t > 10;
+  const meta = [year, catName, item.rating ? '★ ' + item.rating : ''].filter(Boolean).map(esc).join('<span>·</span>');
+  crumb.innerHTML = `<button class="btn" id="btnBack">← Volver</button><section class="movie-detail" ${item.logo ? `style="--detail-image:url('${esc(item.logo)}')"` : ''}>
+    <div class="movie-detail-poster" ${item.logo ? `style="background-image:url('${esc(item.logo)}')"` : ''}></div>
+    <div class="movie-detail-copy"><span class="home-eyebrow">PELÍCULA</span><h1>${esc(item.title)}</h1><div class="movie-meta">${meta}</div>
+    <p>${esc(item.plot || 'Reproduce esta película desde tu lista.')}</p>
+    <div class="row"><button class="btn primary" data-play-detail>▶ ${resumable ? 'Continuar viendo' : 'Reproducir película'}</button>
+    <button class="btn" data-fav-detail>${S.favs[item.key] ? '★ En favoritos' : '☆ Añadir a favoritos'}</button>
+    ${item.type === 'movie' ? `<button class="btn" data-dl-detail>⬇ Descargar</button>` : ''}</div>
+    ${resumable ? `<div class="detail-progress"><i style="width:${Math.min(100, (progress.t / progress.d) * 100)}%"></i></div><small>Continúa en ${fmtTime(progress.t)}</small>` : ''}</div>
+  </section>`;
+  const grid = $('#grid');
+  grid.className = 'dashboard';
+  grid.innerHTML = '';
 }
 
 function renderContinue() {
@@ -340,6 +498,7 @@ function cleanEpTitle(t) {
 function renderEpisodes() {
   const s = viewSeries;
   const crumb = $('#crumb');
+  crumb.classList.remove('movie-crumb');
   crumb.classList.remove('hidden');
   crumb.innerHTML = `<button class="btn" id="btnBack">← Volver</button>
     <div class="serieinfo"><b>${esc(s.title)}</b>${s.plot ? `<div class="plot">${esc(s.plot)}</div>` : ''}</div>`;
@@ -437,7 +596,7 @@ async function openSeries(item, autoPlayKey) {
 }
 
 function seriesRefOf(s) {
-  return { key: s.key, pid: s.pid, title: s.title, logo: s.logo, id: s.id, type: 'series' };
+  return { key: s.key, pid: s.pid, title: s.title, logo: s.logo, id: s.id, type: 'series', plot: s.plot || '' };
 }
 
 function playEpisode(i) {
@@ -451,13 +610,22 @@ function playQueue(queue, index, seriesItem) {
   const ep = queue[index];
   playMedia({
     key: ep.key, title: ep.title, url: ep.url, type: 'episode',
-    img: ep.img || (seriesItem && seriesItem.logo) || '',
+    img: ep.img || (seriesItem && seriesItem.logo) || '', plot: ep.plot || (seriesItem && seriesItem.plot) || '',
     queue, index, seriesItem
   });
 }
 
 function destroyHls() {
   if (hls) { try { hls.destroy(); } catch (e) { /* nada */ } hls = null; }
+}
+
+function pauseForSourceReset(video) {
+  if (!video.paused) ignoredPauseEvents++;
+  video.pause();
+}
+
+function createHls(options) {
+  return new window.Hls(Object.assign({ maxBufferLength: 20, backBufferLength: 15 }, options || {}));
 }
 
 function hideNextOverlay() {
@@ -487,15 +655,25 @@ function hideError() {
   el.classList.remove('soft');
 }
 
-function playMedia(m) {
-  const v = $('#video');
-  window.iptv.transcodeStop();
+function playMedia(m) {  const v = $('#video');
+  if (current) saveProgress(true);
+  current = null;
+  v.onloadedmetadata = null;
+  pauseForSourceReset(v);
+  destroyHls();
+  clearSubTracks();
+  v.removeAttribute('src');
+  v.load();
+  window.iptv.transcodeStop().catch(() => {});
   clearTimeout(checkTimer);
   m.tOffset = 0;
   m.transcoding = false;
   m.converting = false;
   m.checked = false;
+  m.mediaRecoveryAttempted = false;
+  m.fallbackStarted = false;
   current = m;
+  lastSave = 0;
   hideNextOverlay();
   hideError();
   $('#playerWrap').classList.remove('hidden');
@@ -504,8 +682,6 @@ function playMedia(m) {
   $('#btnNext').classList.toggle('hidden', !m.queue);
   $('#btnFavNow').classList.toggle('hidden', !!m.queue || !m.item);
   updateFavNow();
-  destroyHls();
-  clearSubTracks();
   // al avanzar de capítulo, mostrar su temporada y resaltarlo en la lista
   if (viewSeries && m.seriesItem === viewSeries && m.queue && m.queue[m.index]) {
     viewSeason = m.queue[m.index].season;
@@ -515,6 +691,7 @@ function playMedia(m) {
   const saved = S.progress[m.key];
   const resumeAt = saved && !saved.done && saved.t > 10 && (!saved.d || saved.t < saved.d - 30) ? saved.t : 0;
   v.onloadedmetadata = () => {
+    if (current !== m) return;
     if (isFinite(v.duration) && v.duration > 0) m.knownD = v.duration;
     if (resumeAt && m.type !== 'live') v.currentTime = resumeAt;
     onTracksKnown();
@@ -522,20 +699,33 @@ function playMedia(m) {
 
   const isHls = /\.m3u8(\?|$)/i.test(m.url);
   if (isHls && window.Hls && window.Hls.isSupported()) {
-    hls = new window.Hls({ maxBufferLength: 30 });
-    hls.on(window.Hls.Events.ERROR, (_e, d) => {
-      if (!d.fatal) return;
-      if (current && !current.converting) startTranscode(false);
-      else showError('No se pudo reproducir aquí. Prueba “Abrir en VLC”.');
+    const player = createHls();
+    hls = player;
+    player.on(window.Hls.Events.ERROR, (_e, d) => {
+      if (!d.fatal || current !== m || hls !== player) return;
+      if (d.type === window.Hls.ErrorTypes.MEDIA_ERROR && !m.mediaRecoveryAttempted) {
+        m.mediaRecoveryAttempted = true;
+        player.recoverMediaError();
+        return;
+      }
+      if (m.fallbackStarted) {
+        showError('No se pudo reproducir aquí. Prueba “Abrir en VLC”.');
+        return;
+      }
+      m.fallbackStarted = true;
+      startTranscode(d.type === window.Hls.ErrorTypes.MEDIA_ERROR);
     });
-    hls.on(window.Hls.Events.AUDIO_TRACKS_UPDATED, onTracksKnown);
-    hls.on(window.Hls.Events.SUBTITLE_TRACKS_UPDATED, onTracksKnown);
-    hls.loadSource(m.url);
-    hls.attachMedia(v);
+    player.on(window.Hls.Events.MANIFEST_PARSED, () => {
+      if (current === m && hls === player) v.play().catch(() => {});
+    });
+    player.on(window.Hls.Events.AUDIO_TRACKS_UPDATED, onTracksKnown);
+    player.on(window.Hls.Events.SUBTITLE_TRACKS_UPDATED, onTracksKnown);
+    player.loadSource(m.url);
+    player.attachMedia(v);
   } else {
     v.src = m.url;
+    v.play().catch(() => {});
   }
-  v.play().catch(() => { /* autoplay bloqueado */ });
 
   // EPG
   $('#epg').innerHTML = '';
@@ -543,11 +733,13 @@ function playMedia(m) {
 }
 
 function playItem(item) {
-  playMedia({ key: item.key, title: item.title, url: streamUrl(item), type: item.type, item, img: item.logo || '' });
+  playMedia({ key: item.key, title: item.title, url: streamUrl(item), type: item.type, item, img: item.logo || '', plot: item.plot || '' });
 }
 
 function saveProgress(force) {
-  if (!current || current.type === 'live') return;
+  if (!current || current.type === 'live' || current.catchup) return;
+  const playlist = activePl();
+  if (!playlist) return;
   const v = $('#video');
   const dur = current.knownD || v.duration;
   if (!isFinite(dur) || dur <= 0) return;
@@ -556,18 +748,18 @@ function saveProgress(force) {
   if (!force && now - lastSave < 5000) return;
   lastSave = now;
   const entry = {
-    key: current.key, pid: activePl().id, title: current.title, url: current.url,
+    key: current.key, pid: playlist.id, title: current.title, url: current.url,
     type: current.type, t: (current.tOffset || 0) + v.currentTime, d: dur, updated: now, done: false,
-    img: current.img || ''
+    img: current.img || '', plot: current.plot || current.item?.plot || current.seriesItem?.plot || ''
   };
   if (current.seriesItem) entry.seriesRef = seriesRefOf(current.seriesItem);
-  else if (current.item) entry.itemRef = { key: current.item.key, title: current.item.title, logo: current.item.logo, type: current.item.type, url: streamUrl(current.item), pid: current.item.pid };
+  else if (current.item) entry.itemRef = { key: current.item.key, title: current.item.title, logo: current.item.logo, type: current.item.type, url: streamUrl(current.item), pid: current.item.pid, id: current.item.id, plot: current.item.plot || '' };
   S.progress[current.key] = entry;
   save();
 }
 
 function onEnded() {
-  if (!current || current.type === 'live') return;
+  if (!current || current.type === 'live' || current.catchup) return;
   const now = Date.now();
   const prev = S.progress[current.key] || {};
   S.progress[current.key] = Object.assign({}, prev, {
@@ -618,18 +810,21 @@ function goPrev() {
   playQueue(current.queue, current.index - 1, current.seriesItem);
 }
 
-function closePlayer() {
-  const v = $('#video');
+function closePlayer() {  const v = $('#video');
   saveProgress(true);
+  current = null;
+  v.onloadedmetadata = null;
   hideNextOverlay();
   clearTimeout(checkTimer);
   destroyHls();
-  window.iptv.transcodeStop();
-  v.pause();
+  window.iptv.transcodeStop().catch(() => {});
+  pauseForSourceReset(v);
   v.removeAttribute('src');
   v.load();
   current = null;
   $('#playerWrap').classList.add('hidden');
+  $('#app').classList.remove('cinema');
+  $('#btnCinema').textContent = '▣ Modo cine';
   if (tab === 'continue' || viewSeries) render();
 }
 
@@ -768,16 +963,30 @@ async function startTranscode(full, extra) {
   m.converting = true;
   const pos = m.type === 'live' ? 0 : (m.tOffset || 0) + (v.currentTime || 0);
   if (!m.knownD && !m.transcoding && isFinite(v.duration) && v.duration > 0) m.knownD = v.duration;
+  saveProgress(true);
+  m.transcoding = false;
   clearTimeout(checkTimer);
   destroyHls();
   v.onloadedmetadata = null;
-  v.pause();
+  pauseForSourceReset(v);
   v.removeAttribute('src');
   v.load();
   showError(full ? 'Convirtiendo video y audio para reproducirlo…' : 'Preparando audio compatible…');
-  const r = await window.iptv.transcodeStart(m.url, Object.assign({ start: pos, full, live: m.type === 'live' }, extra || {}));
-  if (current !== m) return;
-  if (!r.ok) { showError(r.error || 'No se pudo convertir el video'); return; }
+  let r;
+  try {
+    r = await window.iptv.transcodeStart(m.url, Object.assign({ start: pos, full, live: m.type === 'live' }, extra || {}));
+  } catch (err) {
+    m.converting = false;
+    if (current === m) showError('No se pudo iniciar la conversión: ' + (err && err.message || 'error desconocido'));
+    return;
+  }
+  if (current !== m) { m.converting = false; return; }
+  if (!r || !r.ok) {
+    m.converting = false;
+    showError((r && r.error) || 'No se pudo convertir el video');
+    return;
+  }
+  m.converting = false;
   m.transcoding = true;
   m.tOffset = pos > 1 ? Math.floor(pos) : 0;
   if (m.trackInfo && r.subs) {
@@ -787,15 +996,18 @@ async function startTranscode(full, extra) {
   }
   if (m.trackInfo) setSubTracks(m);
   hideError();
-  hls = new window.Hls({ startPosition: 0, maxBufferLength: 30 });
-  hls.on(window.Hls.Events.ERROR, (_e, d) => {
-    if (d.fatal) showError('No se pudo reproducir. Prueba “Abrir en VLC”.');
+  const player = createHls({ startPosition: 0 });
+  hls = player;
+  player.on(window.Hls.Events.ERROR, (_e, d) => {
+    if (d.fatal && current === m && hls === player) showError('No se pudo reproducir. Prueba “Abrir en VLC”.');
   });
-  hls.on(window.Hls.Events.AUDIO_TRACKS_UPDATED, onTracksKnown);
-  hls.on(window.Hls.Events.SUBTITLE_TRACKS_UPDATED, onTracksKnown);
-  hls.loadSource(r.url);
-  hls.attachMedia(v);
-  v.play().catch(() => { /* nada */ });
+  player.on(window.Hls.Events.MANIFEST_PARSED, () => {
+    if (current === m && hls === player) v.play().catch(() => {});
+  });
+  player.on(window.Hls.Events.AUDIO_TRACKS_UPDATED, onTracksKnown);
+  player.on(window.Hls.Events.SUBTITLE_TRACKS_UPDATED, onTracksKnown);
+  player.loadSource(r.url);
+  player.attachMedia(v);
 }
 
 /* ===================== EPG ===================== */
@@ -806,9 +1018,43 @@ function renderEpg(list) {
   el.innerHTML = '<div class="lbl muted">Guía</div>' + list.map((e) => {
     const isNow = e.start <= now && now < e.stop;
     const t = (d) => new Date(d).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    return `<div class="prog ${isNow ? 'now' : ''}"><div class="t">${t(e.start)} – ${t(e.stop)}${isNow ? ' · ahora' : ''}</div><div>${esc(e.title)}</div></div>`;
+    const catchup = e.catchupUrl ? `<button class="btn epg-play" data-url="${esc(e.catchupUrl)}" data-title="${esc(e.title)}" data-start="${e.start}">▶ Desde el inicio</button>` : '';
+    return `<div class="prog ${isNow ? 'now' : ''}"><div class="t">${t(e.start)} – ${t(e.stop)}${isNow ? ' · ahora' : ''}</div><div>${esc(e.title)}</div>${catchup}</div>`;
   }).join('');
 }
+
+function xtreamCatchupUrl(p, item, e) {
+  if (!item.tvArchive || !item.archiveDays || !item.id || !e.start || !e.stop) return '';
+  const duration = Math.max(1, Math.ceil((e.stop - e.start) / 60000));
+  const d = new Date(e.start);
+  const start = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}:${pad(d.getHours())}-${pad(d.getMinutes())}`;
+  return `${plBase(p)}/timeshift/${enc(p.user)}/${enc(p.pass)}/${duration}/${start}/${enc(item.id)}.ts`;
+}
+
+function m3uCatchupUrl(item, e) {
+  if (!item.catchup || item.catchup === 'none' || !item.catchupDays || !e.start || !e.stop) return '';
+  const start = Math.floor(e.start / 1000), stop = Math.floor(e.stop / 1000);
+  const base = item.catchupSource || item.url || '';
+  if (!base) return '';
+  const replacements = { '{utc}': start, '${utc}': start, '{lutc}': stop, '${lutc}': stop, '{start}': start, '{duration}': Math.max(1, Math.ceil((e.stop - e.start) / 60000)) };
+  let url = base;
+  for (const [token, value] of Object.entries(replacements)) url = url.split(token).join(String(value));
+  if (!/\{[^}]+\}|\$\{[^}]+\}/.test(url) && !/[?&](?:utc|start)=/i.test(url)) {
+    const sep = url.includes('?') ? '&' : '?';
+    url += `${sep}utc=${start}&lutc=${stop}`;
+  }
+  return url;
+}
+
+$('#epg').addEventListener('click', (event) => {
+  const button = event.target.closest('.epg-play');
+  if (!button || !current?.item) return;
+  const item = current.item;
+  playMedia({
+    key: `${item.key}:catchup:${button.dataset.start}`, title: button.dataset.title,
+    url: button.dataset.url, type: 'catchup', item, img: item.logo || '', catchup: true
+  });
+});
 
 function parseXmltvDate(s) {
   const m = String(s).match(/(\d{4})(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)\s*([+-])?(\d{2})?(\d{2})?/);
@@ -831,12 +1077,17 @@ async function showEpg(item) {
   const el = $('#epg');
   try {
     if (p.type === 'xtream' && item.id) {
-      const r = await api(p, 'get_short_epg', `&stream_id=${enc(item.id)}&limit=6`);
+      let r;
+      try { r = await api(p, 'get_simple_data_table', `&stream_id=${enc(item.id)}`); }
+      catch (_) { r = await api(p, 'get_short_epg', `&stream_id=${enc(item.id)}&limit=24`); }
+      const now = Date.now();
       const list = (r.epg_listings || []).map((e) => ({
         title: b64utf8(e.title),
         start: (+e.start_timestamp || 0) * 1000,
         stop: (+e.stop_timestamp || 0) * 1000
-      }));
+      })).filter((e) => e.start && e.stop && e.stop >= now - (Math.max(0, item.archiveDays || 0) * 86400000) && e.start <= now + 86400000)
+        .sort((a, b) => a.start - b.start).slice(-80);
+      for (const e of list) if (e.stop <= now) e.catchupUrl = xtreamCatchupUrl(p, item, e);
       if (current && current.item === item) renderEpg(list);
     } else if (item.epgId) {
       const url = p.epg || (cache[p.id] || {}).epgUrl;
@@ -851,19 +1102,24 @@ async function showEpg(item) {
       const re = /<programme\b([^>]*)>([\s\S]*?)<\/programme>/g;
       const now = Date.now();
       const list = [];
+      const maxAge = Math.max(0, item.catchupDays || 0) * 86400000;
       let m;
-      while ((m = re.exec(text)) && list.length < 6) {
+      while ((m = re.exec(text)) && list.length < 500) {
         const attrs = m[1];
         const ch = (attrs.match(/channel="([^"]*)"/) || [])[1];
         if (ch !== item.epgId) continue;
         const stop = parseXmltvDate((attrs.match(/stop="([^"]*)"/) || [])[1]);
-        if (stop < now) continue;
-        list.push({
+        const start = parseXmltvDate((attrs.match(/start="([^"]*)"/) || [])[1]);
+        if (stop < now - maxAge || start > now + 86400000) continue;
+        const program = {
           title: decodeEntities((m[2].match(/<title[^>]*>([\s\S]*?)<\/title>/) || [])[1] || ''),
-          start: parseXmltvDate((attrs.match(/start="([^"]*)"/) || [])[1]),
+          start,
           stop
-        });
+        };
+        if (stop <= now) program.catchupUrl = m3uCatchupUrl(item, program);
+        list.push(program);
       }
+      list.sort((a, b) => a.start - b.start);
       if (current && current.item === item) renderEpg(list);
     } else {
       el.innerHTML = '<div class="muted">Sin guía para este canal.</div>';
@@ -887,10 +1143,44 @@ async function setTab(t) {
   curCat = 'all';
   limit = 200;
   viewSeries = null;
+  viewMovie = null;
   const p = activePl();
   if (!p) { render(); return; }
+  // Mostrar la estructura de Inicio de inmediato; la carga del catálogo puede tardar.
+  if (t === 'home') {
+    render();
+    setStatus('Cargando tu biblioteca…');
+    if (p.type === 'xtream') {
+      const memory = cache[p.id];
+      if (memory?.loaded?.movie && memory?.loaded?.series) return render();
+      let saved = null;
+      try { saved = await window.iptv.catalogCacheGet(p.id); } catch (e) { /* sigue con la lista */ }
+      if (tab !== t || activePl()?.id !== p.id) return;
+      if (restoreCatalogCache(p.id, saved)) {
+        render();
+        const age = Math.max(0, Date.now() - (Number(saved.savedAt) || 0));
+        if (age < CATALOG_CACHE_TTL) {
+          setStatus('Biblioteca guardada · se actualizará en unas horas');
+          return;
+        }
+        // Conserva las filas antiguas en pantalla mientras pide la versión actual.
+        cache[p.id].loaded = {};
+        cache[p.id].catsLoaded = {};
+        cache[p.id].byCat = { movie: {}, series: {} };
+        setStatus('Mostrando biblioteca guardada · actualizando…');
+      }
+    }
+  }
   try {
-    if (['live', 'movie', 'series'].includes(t)) {
+    if (t === 'home') {
+      if (p.type === 'm3u') await ensureLoaded('movie');
+      else {
+        await Promise.all(['movie', 'series'].map((kind) => ensureLoaded(kind)));
+        await Promise.all(['movie', 'series'].map((kind) => ensureCategory(kind, 'all')));
+        window.iptv.catalogCacheSet(p.id, catalogCacheSnapshot(cache[p.id])).catch(() => {});
+      }
+      if (tab !== t) return;
+    } else if (['live', 'movie', 'series'].includes(t)) {
       await ensureLoaded(t);
       if (tab !== t) return;                 // cambió de sección mientras cargaba
       // empieza en la primera categoría de la lista, no en “todas”
@@ -950,6 +1240,15 @@ $('#search').addEventListener('input', (e) => {
 $('#btnMore').addEventListener('click', () => { limit += 200; render(); });
 
 $('#grid').addEventListener('click', (e) => {
+  const openTab = e.target.closest('[data-open-tab]');
+  if (openTab) { setTab(openTab.dataset.openTab); return; }
+  if (e.target.closest('[data-play-detail]') && viewMovie) { playItem(viewMovie); return; }
+  if (e.target.closest('[data-fav-detail]') && viewMovie) {
+    if (S.favs[viewMovie.key]) delete S.favs[viewMovie.key];
+    else S.favs[viewMovie.key] = Object.assign({}, viewMovie);
+    save(); renderMovieDetail(); return;
+  }
+  if (e.target.closest('[data-dl-detail]') && viewMovie) { downloadItem(viewMovie); return; }
   const fav = e.target.closest('[data-fav]');
   if (fav) {
     e.stopPropagation();
@@ -968,16 +1267,17 @@ $('#grid').addEventListener('click', (e) => {
     updateFavNow();
     return;
   }
+  const dlk = e.target.closest('[data-dlkey]');
+  if (dlk) { downloadItem(findItem(dlk.dataset.dlkey)); return; }
   const card = e.target.closest('.card');
   if (card) {
     const it = findItem(card.dataset.key);
     if (!it) return;
     if (it.type === 'series') openSeries(it.episodes ? it : resolveSeries(it));
+    else if (it.type === 'movie') openMovie(it);
     else playItem(it);
     return;
   }
-  const dlk = e.target.closest('[data-dlkey]');
-  if (dlk) { downloadItem(findItem(dlk.dataset.dlkey)); return; }
   const dle = e.target.closest('[data-dlep]');
   if (dle) { downloadEpisodes([viewSeries.episodes[parseInt(dle.dataset.dlep, 10)]]); return; }
   if (e.target.closest('[data-dlseason]')) {
@@ -995,7 +1295,20 @@ $('#grid').addEventListener('click', (e) => {
   if (rm) {
     e.stopPropagation();
     const en = S.progress[rm.dataset.rm];
-    if (en) { en.hidden = true; save(); render(); }
+    if (en) {
+      // Quitar una serie de Continuar viendo también limpia sus capítulos guardados,
+      // para que no reaparezca por el progreso de un episodio anterior.
+      if (en.seriesRef) {
+        const seriesKey = en.seriesRef.key;
+        Object.keys(S.progress).forEach((key) => {
+          if (S.progress[key].seriesRef?.key === seriesKey) delete S.progress[key];
+        });
+      } else {
+        delete S.progress[en.key];
+      }
+      save();
+      render();
+    }
     return;
   }
   const chip = e.target.closest('[data-season]');
@@ -1007,7 +1320,14 @@ $('#grid').addEventListener('click', (e) => {
 });
 
 $('#crumb').addEventListener('click', (e) => {
-  if (e.target.id === 'btnBack') { viewSeries = null; render(); }
+  if (e.target.id === 'btnBack') { viewSeries = null; viewMovie = null; render(); }
+  if (e.target.closest('[data-play-detail]') && viewMovie) playItem(viewMovie);
+  if (e.target.closest('[data-fav-detail]') && viewMovie) {
+    if (S.favs[viewMovie.key]) delete S.favs[viewMovie.key];
+    else S.favs[viewMovie.key] = Object.assign({}, viewMovie);
+    save(); renderMovieDetail();
+  }
+  if (e.target.closest('[data-dl-detail]') && viewMovie) downloadItem(viewMovie);
 });
 
 function findItem(key) {
@@ -1042,7 +1362,10 @@ function resumeEntry(e) {
 // reproductor
 const video = $('#video');
 video.addEventListener('timeupdate', () => saveProgress(false));
-video.addEventListener('pause', () => saveProgress(true));
+video.addEventListener('pause', () => {
+  if (ignoredPauseEvents > 0) { ignoredPauseEvents--; return; }
+  saveProgress(true);
+});
 video.addEventListener('ended', onEnded);
 video.addEventListener('playing', () => {
   if (current && current.transcoding) hideError();
@@ -1061,6 +1384,11 @@ $('#btnPrev').addEventListener('click', goPrev);
 $('#btnNextNow').addEventListener('click', goNext);
 $('#btnNextCancel').addEventListener('click', hideNextOverlay);
 $('#btnClose').addEventListener('click', closePlayer);
+
+$('#btnCinema').addEventListener('click', () => {
+  const enabled = $('#app').classList.toggle('cinema');
+  $('#btnCinema').textContent = enabled ? '▣ Salir del modo cine' : '▣ Modo cine';
+});
 $('#btnVlc').addEventListener('click', async () => {
   if (!current) return;
   v_pause();
@@ -1162,6 +1490,7 @@ $('#formAdd').addEventListener('submit', (e) => {
 $('#btnDel').addEventListener('click', () => {
   const p = activePl();
   if (!p || !confirm(`¿Quitar la lista “${p.name}”?`)) return;
+  window.iptv.catalogCacheDelete(p.id).catch(() => {});
   S.playlists = S.playlists.filter((x) => x.id !== p.id);
   localStorage.removeItem('iptv_m3u_' + p.id);
   delete cache[p.id];
@@ -1229,6 +1558,11 @@ function renderTrackMenu() {
   html += '<div class="tmh">Subtítulos</div>';
   html += `<button class="tm ${subs.some((s) => s.active) ? '' : 'on'}" data-kind="sub" data-i="-1">Desactivados</button>`;
   html += subs.map((t) => row('sub', t)).join('');
+  if (subs.some((s) => s.active) && !(hls && (hls.subtitleTracks || []).length)) {
+    const delay = Number(S.trackPref && S.trackPref.subDelay) || 0;
+    const shown = (delay > 0 ? '+' : '') + delay.toFixed(1) + ' s';
+    html += `<div class="sub-delay"><span>Sincronía</span><button data-delay="-0.5" title="Adelantar subtítulos 0,5 s">−0,5</button><b>${shown}</b><button data-delay="0.5" title="Retrasar subtítulos 0,5 s">+0,5</button><button data-delay="reset" title="Restablecer retraso">↺</button></div>`;
+  }
   if (loading) html += '<div class="tmn">Buscando más audios y subtítulos…</div>';
   else if (!subs.length && !canLoad) html += '<div class="tmn">Este video no trae subtítulos</div>';
   else if (canLoad) html += '<button class="tm" data-kind="load" data-i="0">🔍 Buscar más audios y subtítulos</button>';
@@ -1281,6 +1615,26 @@ function selectTrack(kind, i) {
   applyTrackChoice(kind, i);
 }
 
+function setSubtitleDelay(value) {
+  S.trackPref = S.trackPref || { audio: null, sub: null, subOff: false, everUsed: false };
+  const previous = Number(S.trackPref.subDelay) || 0;
+  const next = Math.max(-10, Math.min(10, value));
+  S.trackPref.subDelay = next;
+  save();
+  const tracks = textTracksOf($('#video'));
+  const tt = tracks.find((track) => track.mode === 'showing') || tracks[subSel];
+  if (tt && tt.cues) {
+    const delta = next - previous;
+    Array.from(tt.cues).forEach((cue) => {
+      try {
+        cue.startTime = Math.max(0, cue.startTime + delta);
+        cue.endTime = Math.max(cue.startTime + 0.05, cue.endTime + delta);
+      } catch (e) { /* algunas pistas nativas no admiten edición */ }
+    });
+  }
+  renderTrackMenu();
+}
+
 // Aplica en silencio, apenas se conocen las pistas de este video, el audio/subtítulo
 // que el usuario venía usando (por nombre), sin que tenga que volver a elegirlo.
 function applyTrackPref() {
@@ -1310,6 +1664,7 @@ function onTracksKnown() {
 // Subtítulos extraídos con ffmpeg aparte: los textos se van añadiendo a medida que llegan
 let subTimer = null;        // refresco mientras ffmpeg sigue escribiendo el .vtt
 let subSel = -1;            // pista de subtítulos elegida
+let subOffset = 0;          // tiempo real donde empieza una extracción directa
 const subSeen = new Set();  // textos ya añadidos (evita duplicados)
 
 function stopSubRefresh() {
@@ -1330,7 +1685,8 @@ function parseVtt(txt) {
     if (!m) continue;
     const text = lines.slice(k + 1).join('\n').trim();
     if (!text) continue;
-    out.push({ start: secs(m[1], m[2], m[3], m[4]), end: secs(m[5], m[6], m[7], m[8]), text });
+    out.push({ start: subOffset + secs(m[1], m[2], m[3], m[4]),
+      end: subOffset + secs(m[5], m[6], m[7], m[8]), text });
   }
   return out;
 }
@@ -1347,7 +1703,9 @@ async function addSubText(i, url) {
     const key = c.start + '|' + c.end + '|' + c.text;
     if (subSeen.has(key)) continue;
     subSeen.add(key);
-    try { tt.addCue(new VTTCue(c.start, c.end, c.text)); } catch (e) { /* nada */ }
+    const delay = Number(S.trackPref && S.trackPref.subDelay) || 0;
+    const start = Math.max(0, c.start + delay);
+    try { tt.addCue(new VTTCue(start, Math.max(start + 0.05, c.end + delay), c.text)); } catch (e) { /* nada */ }
   }
   return !!(tt.cues && tt.cues.length);
 }
@@ -1356,6 +1714,7 @@ async function selectTextTrack(i) {
   const m = current;
   stopSubRefresh();
   subSel = i;
+  subOffset = 0;
   const tts = textTracksOf($('#video'));
   tts.forEach((t, k) => { if (k !== i) t.mode = 'disabled'; });
   const s = m && m.trackInfo && m.trackInfo.subs && m.trackInfo.subs[i];
@@ -1371,10 +1730,12 @@ async function selectTextTrack(i) {
   showToast('Cargando subtítulo…');
   let url = s.url;
   try {
-    const ex = await window.iptv.extractSub(s.i);
+    const direct = !m.transcoding;
+    const ex = await window.iptv.extractSub(s.i, m.url, direct ? ($('#video').currentTime || 0) : 0);
     if (current !== m || subSel !== i) return;
     if (!ex.ok) throw new Error(ex.error || 'no se pudo extraer');
     url = ex.url;
+    subOffset = Number(ex.offset) || 0;
   } catch (e) {
     showError('No se pudo cargar el subtítulo' + (e && e.message ? ': ' + e.message : ''));
     renderTrackMenu();
@@ -1390,7 +1751,7 @@ async function selectTextTrack(i) {
     if (current !== m || subSel !== i) return;
     if (ok) break;
     let st = null;
-    try { st = await window.iptv.subStatus(s.i); } catch (e) { /* nada */ }
+    try { st = await window.iptv.subStatus(s.i, m.url); } catch (e) { /* nada */ }
     if (st && st.state === 'error') { fail = st.error || 'ffmpeg falló'; break; }
     if (st && (st.state === 'done' || st.state === 'none')) break;
     await new Promise((r) => setTimeout(r, 500));
@@ -1408,7 +1769,7 @@ async function selectTextTrack(i) {
       if (current !== m || subSel !== i) { stopSubRefresh(); return; }
       try { await addSubText(i, url); } catch (e) { /* nada */ }
       let st = null;
-      try { st = await window.iptv.subStatus(s.i); } catch (e) { /* nada */ }
+      try { st = await window.iptv.subStatus(s.i, m.url); } catch (e) { /* nada */ }
       if (st && (st.state === 'done' || st.state === 'none')) stopSubRefresh();
       if (st && st.state === 'error') {
         stopSubRefresh();
@@ -1454,9 +1815,16 @@ async function loadAllTracks() {
   renderTrackMenu();
   trackMenu.classList.remove('hidden');
   speedMenu.classList.add('hidden');
-  let info = { audio: [], subs: [] };
-  try { info = await window.iptv.probeTracks(m.url); } catch (e) { /* nada */ }
+  let info = { audio: [], subs: [], error: true };
+  try { info = await window.iptv.probeTracks(m.url); } catch (e) { /* permite reintentar */ }
   if (current !== m) return;
+  if (info.error && !(info.audio || []).length && !(info.subs || []).length) {
+    m.loadingTracks = false;
+    m.trackInfo = null;
+    renderTrackMenu();
+    showToast('No se pudieron buscar las pistas. Puedes volver a intentarlo.');
+    return;
+  }
   const subs = (info.subs || []).filter((s) => s.text);
   if ((info.audio || []).length < 2 && !subs.length) {
     m.loadingTracks = false;
@@ -1465,14 +1833,19 @@ async function loadAllTracks() {
     return;
   }
   m.trackInfo = { audio: info.audio || [], subs };
-  m.converting = false;
-  await startTranscode(!!m.fullMode, {
-    audioCount: (info.audio || []).length,
-    subs: subs.map((s) => s.i)
-  });
+  if ((info.audio || []).length > 1) {
+    m.converting = false;
+    await startTranscode(!!m.fullMode, {
+      audioCount: info.audio.length,
+      subs: subs.map((s) => s.i)
+    });
+  } else {
+    // Para subtítulos se extrae solo la pista elegida; no hace falta reiniciar el video.
+    setSubTracks(m);
+  }
   if (current !== m) return;
   m.loadingTracks = false;
-  if (!m.transcoding) { m.trackInfo = null; renderTrackMenu(); return; }   // si falló, permite reintentar
+  if ((info.audio || []).length > 1 && !m.transcoding) { m.trackInfo = null; renderTrackMenu(); return; }   // si falló, permite reintentar
   applyTrackPref();   // deja listo el audio/subtítulo que se venía usando
   renderTrackMenu();
 }
@@ -1656,6 +2029,12 @@ $('#vstage').addEventListener('dblclick', (e) => { if (e.target === video) toggl
 
 /* menús */
 trackMenu.addEventListener('click', (e) => {
+  const delay = e.target.closest('[data-delay]');
+  if (delay) {
+    const currentDelay = Number(S.trackPref && S.trackPref.subDelay) || 0;
+    setSubtitleDelay(delay.dataset.delay === 'reset' ? 0 : currentDelay + Number(delay.dataset.delay));
+    return;
+  }
   const b = e.target.closest('[data-kind]');
   if (b) selectTrack(b.dataset.kind, parseInt(b.dataset.i, 10));
 });
@@ -1788,4 +2167,4 @@ window.iptv.onDlUpdate((list) => {
 window.iptv.dlList().then((l) => { dlList = l; });
 if (!S.active && S.playlists[0]) S.active = S.playlists[0].id;
 refreshPlaylistSelect();
-setTab('live');
+setTab('home');

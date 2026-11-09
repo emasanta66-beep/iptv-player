@@ -223,6 +223,53 @@ let dlBcTimer = null;
 
 const dlRoot = () => path.join(app.getPath('videos'), 'IPTV Player');
 const dlStore = () => path.join(app.getPath('userData'), 'downloads.json');
+const catalogStore = () => path.join(app.getPath('userData'), 'catalog-cache.json');
+let catalogData = null;
+let catalogLoad = null;
+let catalogWrite = Promise.resolve();
+
+async function getCatalogData() {
+  if (catalogData) return catalogData;
+  if (!catalogLoad) {
+    catalogLoad = fs.promises.readFile(catalogStore(), 'utf8')
+      .then((raw) => JSON.parse(raw))
+      .then((data) => catalogData = data && typeof data === 'object' && !Array.isArray(data) ? data : {})
+      .catch(() => catalogData = {});
+  }
+  return catalogLoad;
+}
+
+function persistCatalogData() {
+  const serialized = JSON.stringify(catalogData || {});
+  // Avoid letting a malformed or unexpectedly huge IPTV catalog fill userData.
+  if (Buffer.byteLength(serialized, 'utf8') > 100 * 1024 * 1024) return Promise.resolve(false);
+  const target = catalogStore();
+  const temp = target + '.tmp';
+  catalogWrite = catalogWrite.then(async () => {
+    await fs.promises.writeFile(temp, serialized, 'utf8');
+    await fs.promises.rename(temp, target);
+    return true;
+  }).catch(() => false);
+  return catalogWrite;
+}
+
+ipcMain.handle('catalog-cache-get', async (_e, id) => {
+  if (typeof id !== 'string' || id.length > 100) return null;
+  const data = await getCatalogData();
+  return data[id] || null;
+});
+ipcMain.handle('catalog-cache-set', async (_e, id, entry) => {
+  if (typeof id !== 'string' || id.length > 100 || !entry || typeof entry !== 'object') return false;
+  const data = await getCatalogData();
+  data[id] = entry;
+  return persistCatalogData();
+});
+ipcMain.handle('catalog-cache-delete', async (_e, id) => {
+  if (typeof id !== 'string' || id.length > 100) return false;
+  const data = await getCatalogData();
+  delete data[id];
+  return persistCatalogData();
+});
 
 function dlLoad() {
   try {
@@ -474,8 +521,13 @@ let hlsServer = null;
 let hlsPort = 0;
 let ffProc = null;
 let ffDir = null;
+let transcodeGeneration = 0;
 let subProcs = new Set();   // procesos que extraen los subtítulos aparte
+let probeProcs = new Set(); // sondeos de pistas activos
+let trackProcs = new Set(); // extracción directa de subtítulos
+let trackDirs = new Set();
 let txInfo = null;          // datos de la conversión actual (para extraer subtítulos)
+
 
 function startHlsServer() {
   return new Promise((resolve, reject) => {
@@ -484,8 +536,8 @@ function startHlsServer() {
       const m = (req.url || '').split('?')[0].match(/^\/([\w-]+)\/([\w.-]+)$/);
       if (!m) { res.writeHead(404); return res.end(); }
       const file = path.join(HLS_ROOT, m[1], path.basename(m[2]));
-      fs.readFile(file, (err, data) => {
-        if (err) { res.writeHead(404); return res.end(); }
+      fs.stat(file, (err, stat) => {
+        if (err || !stat.isFile()) { res.writeHead(404); return res.end(); }
         const ct = file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl'
           : file.endsWith('.vtt') ? 'text/vtt; charset=utf-8' : 'video/mp2t';
         res.writeHead(200, {
@@ -493,7 +545,13 @@ function startHlsServer() {
           'Cache-Control': 'no-cache',
           'Access-Control-Allow-Origin': '*'
         });
-        res.end(data);
+        const stream = fs.createReadStream(file);
+        stream.on('error', (streamErr) => {
+          if (!res.headersSent) { res.writeHead(404); res.end(); }
+          else res.destroy(streamErr);
+        });
+        res.on('close', () => { if (!res.writableEnded) stream.destroy(); });
+        stream.pipe(res);
       });
     });
     hlsServer.on('error', reject);
@@ -505,6 +563,7 @@ function startHlsServer() {
 }
 
 function stopTranscode() {
+  transcodeGeneration++;
   if (ffProc) {
     try { ffProc.kill('SIGKILL'); } catch (e) { /* nada */ }
     ffProc = null;
@@ -513,6 +572,19 @@ function stopTranscode() {
     try { p.kill('SIGKILL'); } catch (e) { /* nada */ }
   }
   subProcs.clear();
+  for (const p of probeProcs) {
+    try { p.kill('SIGKILL'); } catch (e) { /* nada */ }
+  }
+  probeProcs.clear();
+  for (const p of trackProcs) {
+    try { p.kill('SIGKILL'); } catch (e) { /* nada */ }
+  }
+  trackProcs.clear();
+  for (const d of trackDirs) {
+    setTimeout(() => { try { fs.rmSync(d, { recursive: true, force: true }); } catch (e) { /* nada */ } }, 500);
+  }
+  trackDirs.clear();
+  directTrackContext = null;
   txInfo = null;
   if (ffDir) {
     const d = ffDir;
@@ -532,7 +604,6 @@ function resolveFfmpeg() {
 }
 
 ipcMain.handle('transcode-stop', () => { stopTranscode(); return true; });
-
 /* ===================== pistas de audio y subtítulos del video ===================== */
 const LANG_NAMES = {
   spa: 'Español', es: 'Español', eng: 'Inglés', en: 'Inglés', por: 'Portugués', pt: 'Portugués',
@@ -578,14 +649,30 @@ function parseProbe(txt) {
 
 // Lee solo la cabecera del video con ffmpeg (no lo descarga entero)
 ipcMain.handle('probe-tracks', (_e, url) => new Promise((resolve) => {
+  if (typeof url !== 'string' || !/^https?:/i.test(url)) return resolve({ audio: [], subs: [], error: true });
   let err = '';
   let done = false;
+  let timedOut = false;
   let proc = null;
-  const finish = () => { if (done) return; done = true; clearTimeout(timer); resolve(parseProbe(err)); };
-  const timer = setTimeout(() => { try { proc && proc.kill('SIGKILL'); } catch (e) { /* nada */ } finish(); }, 30000);
+  const finish = () => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    if (proc) probeProcs.delete(proc);
+    const result = parseProbe(err);
+    result.error = timedOut || (!result.audio.length && !result.subs.length);
+    resolve(result);
+  };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try { proc && proc.kill('SIGKILL'); } catch (e) { /* nada */ }
+    finish();
+  }, 12000);
   try {
-    proc = spawn(resolveFfmpeg(), ['-hide_banner', '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20', '-i', url],
+    proc = spawn(resolveFfmpeg(), ['-hide_banner', '-probesize', '2M', '-analyzeduration', '2000000',
+      '-rw_timeout', '8000000', '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20', '-i', url],
       { stdio: ['ignore', 'ignore', 'pipe'] });
+    probeProcs.add(proc);
     proc.stderr.on('data', (d) => { if (err.length < 300000) err += d.toString(); });
     proc.on('error', () => { err = ''; finish(); });
     proc.on('exit', finish);
@@ -595,8 +682,10 @@ ipcMain.handle('probe-tracks', (_e, url) => new Promise((resolve) => {
 ipcMain.handle('transcode-start', async (_e, url, opts) => {
   opts = opts || {};
   stopTranscode();
+  const generation = transcodeGeneration;
   try {
     const port = await startHlsServer();
+    if (generation !== transcodeGeneration) return { ok: false, error: 'Conversión cancelada' };
     const id = 's' + Date.now().toString(36);
     const dir = path.join(HLS_ROOT, id);
     fs.mkdirSync(dir, { recursive: true });
@@ -613,7 +702,10 @@ ipcMain.handle('transcode-start', async (_e, url, opts) => {
     args.push('-i', url, '-map', '0:v:0?');
     if (multi) for (let k = 0; k < opts.audioCount; k++) args.push('-map', '0:a:' + k);
     else args.push('-map', '0:a:0?');
-    if (opts.full) args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p');
+    // With video stream-copy, input-side -ss can retain the preceding keyframe.
+    // Re-encode only when resuming from a nonzero position so audio and external
+    // subtitles share the exact same start point; at the beginning, keep it fast.
+    if (opts.full || startArg > 0) args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p');
     else args.push('-c:v', 'copy');
     args.push('-c:a', 'aac', '-ac', '2', '-b:a', '192k', '-f', 'hls', '-hls_time', '4');
     if (multi) {
@@ -646,6 +738,7 @@ ipcMain.handle('transcode-start', async (_e, url, opts) => {
       : [playlist];
     const t0 = Date.now();
     while (Date.now() - t0 < 30000) {
+      if (generation !== transcodeGeneration) return { ok: false, error: 'Conversión cancelada' };
       if (fs.existsSync(playlist) && readyFiles.every(hasTs)) {
         txInfo = {
           src: url, start: startArg, dir, port, id, subIdx,
@@ -679,10 +772,30 @@ function subUrlOf(tx, i) {
   return `http://127.0.0.1:${tx.port}/${tx.id}/sub${i}.vtt`;
 }
 
-function extractSubtitle(i) {
+function extractSubtitle(i, url, start) {
   const tx = txInfo;
-  if (!tx || !tx.subIdx.includes(i)) return { ok: false, error: 'No hay una conversión activa' };
-  if (tx.done.has(i) || tx.jobs.has(i)) return { ok: true, url: subUrlOf(tx, i) };
+  if (tx && tx.src === url) {
+    if (!tx.subIdx.includes(i)) tx.subIdx.push(i);
+    if (tx.done.has(i) || tx.jobs.has(i)) return { ok: true, url: subUrlOf(tx, i), offset: 0 };
+    return extractFromContext(tx, i);
+  }
+  if (!url || !/^https?:/i.test(url) || !Number.isInteger(i) || i < 0) return { ok: false, error: 'Datos de pista inválidos' };
+  if (directTrackContext && directTrackContext.src === url && Math.floor(directTrackContext.start) === Math.floor(Math.max(0, Number(start) || 0))) {
+    if (!directTrackContext.subIdx.includes(i)) directTrackContext.subIdx.push(i);
+    return startDirectSubtitle(directTrackContext, i);
+  }
+  const id = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const dir = path.join(HLS_ROOT, id);
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { return { ok: false, error: String(e.message || e) }; }
+  trackDirs.add(dir);
+  // Match the offset applied in the renderer to the integer -ss used below.
+  const context = { src: url, start: Math.floor(Math.max(0, Number(start) || 0)), dir, port: hlsPort, id,
+    subIdx: [i], jobs: new Map(), done: new Set(), errors: new Map() };
+  return startDirectSubtitle(context, i);
+}
+
+function extractFromContext(tx, i) {
+  if (tx.done.has(i) || tx.jobs.has(i)) return { ok: true, url: subUrlOf(tx, i), offset: 0 };
   tx.errors.delete(i);
   const file = path.join(tx.dir, 'sub' + i + '.vtt');
   const args = ['-hide_banner', '-loglevel', 'error',
@@ -714,11 +827,43 @@ function extractSubtitle(i) {
   return { ok: true, url: subUrlOf(tx, i) };
 }
 
-ipcMain.handle('extract-sub', (_e, i) => extractSubtitle(i));
+function startDirectSubtitle(tx, i) {
+  return startHlsServer().then((port) => {
+    tx.port = port;
+    if (!tx.jobs) tx.jobs = new Map();
+    if (!tx.done) tx.done = new Set();
+    if (!tx.errors) tx.errors = new Map();
+    if (tx.done.has(i) || tx.jobs.has(i)) return { ok: true, url: subUrlOf(tx, i), offset: tx.start };
+    tx.errors.delete(i);
+    const file = path.join(tx.dir, 'sub' + i + '.vtt');
+    const args = ['-hide_banner', '-loglevel', 'error', '-probesize', '2M', '-analyzeduration', '2M',
+      '-rw_timeout', '15000000', '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20',
+      '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5'];
+    if (tx.start > 1) args.push('-ss', String(Math.floor(tx.start)));
+    args.push('-i', tx.src, '-map', '0:s:' + i, '-c:s', 'webvtt', '-flush_packets', '1', '-f', 'webvtt', file);
+    let proc;
+    try { proc = spawn(resolveFfmpeg(), args, { stdio: ['ignore', 'ignore', 'pipe'] }); }
+    catch (e) { trackDirs.delete(tx.dir); return { ok: false, error: String(e.message || e) }; }
+    const job = { error: '' }; tx.jobs.set(i, job); trackProcs.add(proc);
+    proc.stderr.on('data', (d) => { job.error = (job.error + d.toString()).slice(-800); });
+    proc.on('error', (e) => { trackProcs.delete(proc); tx.jobs.delete(i); tx.errors.set(i, String(e.message || e)); });
+    proc.on('exit', (code) => {
+      trackProcs.delete(proc); tx.jobs.delete(i);
+      if (code === 0) tx.done.add(i);
+      else tx.errors.set(i, job.error.trim().split('\n').pop() || ('ffmpeg terminó con código ' + code));
+    });
+    // Retain only the latest direct extraction context for status polling.
+    directTrackContext = tx;
+    return { ok: true, url: subUrlOf(tx, i), offset: tx.start };
+  }).catch((e) => ({ ok: false, error: String(e && e.message || e) }));
+}
 
-ipcMain.handle('sub-status', (_e, i) => {
-  const tx = txInfo;
-  if (!tx || !tx.subIdx.includes(i)) return { state: 'none' };
+let directTrackContext = null;
+ipcMain.handle('extract-sub', (_e, i, url, start) => extractSubtitle(i, url, start));
+
+ipcMain.handle('sub-status', (_e, i, url) => {
+  const tx = txInfo && txInfo.subIdx.includes(i) ? txInfo : directTrackContext;
+  if (!tx || !tx.subIdx.includes(i) || (url && tx.src !== url)) return { state: 'none' };
   if (tx.done.has(i)) return { state: 'done' };
   if (tx.jobs.has(i)) return { state: 'working' };
   if (tx.errors.has(i)) return { state: 'error', error: tx.errors.get(i) };
