@@ -25,7 +25,8 @@ function b64utf8(str) {
 }
 
 /* ===================== estado persistente ===================== */
-const S = Object.assign({ playlists: [], active: null, favs: {}, progress: {}, autoNext: true, catOrder: {} },
+const S = Object.assign({ playlists: [], active: null, favs: {}, progress: {}, autoNext: true, catOrder: {},
+  trackPref: { audio: null, sub: null, subOff: false, everUsed: false } },
   JSON.parse(localStorage.getItem('iptv') || '{}'));
 function save() {
   try { localStorage.setItem('iptv', JSON.stringify(S)); } catch (e) { /* cuota */ }
@@ -516,6 +517,7 @@ function playMedia(m) {
   v.onloadedmetadata = () => {
     if (isFinite(v.duration) && v.duration > 0) m.knownD = v.duration;
     if (resumeAt && m.type !== 'live') v.currentTime = resumeAt;
+    onTracksKnown();
   };
 
   const isHls = /\.m3u8(\?|$)/i.test(m.url);
@@ -526,6 +528,8 @@ function playMedia(m) {
       if (current && !current.converting) startTranscode(false);
       else showError('No se pudo reproducir aquí. Prueba “Abrir en VLC”.');
     });
+    hls.on(window.Hls.Events.AUDIO_TRACKS_UPDATED, onTracksKnown);
+    hls.on(window.Hls.Events.SUBTITLE_TRACKS_UPDATED, onTracksKnown);
     hls.loadSource(m.url);
     hls.attachMedia(v);
   } else {
@@ -787,6 +791,8 @@ async function startTranscode(full, extra) {
   hls.on(window.Hls.Events.ERROR, (_e, d) => {
     if (d.fatal) showError('No se pudo reproducir. Prueba “Abrir en VLC”.');
   });
+  hls.on(window.Hls.Events.AUDIO_TRACKS_UPDATED, onTracksKnown);
+  hls.on(window.Hls.Events.SUBTITLE_TRACKS_UPDATED, onTracksKnown);
   hls.loadSource(r.url);
   hls.attachMedia(v);
   v.play().catch(() => { /* nada */ });
@@ -1214,20 +1220,24 @@ function renderTrackMenu() {
   const { audio, subs } = trackList();
   const row = (kind, t) => `<button class="tm ${t.active ? 'on' : ''}" data-kind="${kind}" data-i="${t.i}">${t.active ? '✓ ' : ''}${esc(t.label)}</button>`;
   let html = '<div class="tmh">Audio</div>';
-  // El reproductor integrado no ve todas las pistas de un video (p. ej. .mkv): se pueden buscar con ffmpeg
+  // El reproductor integrado no ve todas las pistas de un video (p. ej. .mkv): se buscan
+  // solas con ffmpeg apenas se abre este menú, así no hace falta un botón aparte.
   const canLoad = !!current && current.type !== 'live' && !current.trackInfo && /^https?:/i.test(current.url || '');
+  const loading = !!current && current.loadingTracks;
   if (audio.length) html += audio.map((t) => row('audio', t)).join('');
-  else if (!canLoad) html += '<div class="tmn">Este video no tiene otras pistas de audio</div>';
+  else if (!canLoad && !loading) html += '<div class="tmn">Este video no tiene otras pistas de audio</div>';
   html += '<div class="tmh">Subtítulos</div>';
   html += `<button class="tm ${subs.some((s) => s.active) ? '' : 'on'}" data-kind="sub" data-i="-1">Desactivados</button>`;
   html += subs.map((t) => row('sub', t)).join('');
-  if (!subs.length && !canLoad) html += '<div class="tmn">Este video no trae subtítulos</div>';
-  if (canLoad) html += '<button class="tm" data-kind="load" data-i="0">🔍 Buscar todos los audios y subtítulos</button>';
+  if (loading) html += '<div class="tmn">Buscando más audios y subtítulos…</div>';
+  else if (!subs.length && !canLoad) html += '<div class="tmn">Este video no trae subtítulos</div>';
+  else if (canLoad) html += '<button class="tm" data-kind="load" data-i="0">🔍 Buscar más audios y subtítulos</button>';
   $('#trackMenu').innerHTML = html;
 }
 
-function selectTrack(kind, i) {
-  if (kind === 'load') { loadAllTracks(); return; }
+// Aplica la pista sin tocar la preferencia guardada (la usa tanto la elección manual
+// como la restauración automática al cambiar de capítulo).
+function applyTrackChoice(kind, i) {
   const v = $('#video');
   const hlsSubs = !!hls && (hls.subtitleTracks || []).length > 0;
   if (hls && kind === 'audio') {
@@ -1242,6 +1252,59 @@ function selectTrack(kind, i) {
   }
   renderTrackMenu();
   updateTrackIcon();
+}
+
+const trackPrefKey = (label) => String(label || '').trim().toLowerCase();
+
+// Recuerda el audio/subtítulo que el usuario eligió a mano, para aplicarlo solo
+// (sin que tenga que volver a elegirlo) en el próximo capítulo o video.
+function rememberTrackChoice(kind, i) {
+  S.trackPref = S.trackPref || { audio: null, sub: null, subOff: false, everUsed: false };
+  if (kind === 'audio') {
+    const t = trackList().audio.find((x) => x.i === i);
+    S.trackPref.audio = t ? t.label : null;
+  } else {
+    if (i < 0) { S.trackPref.sub = null; S.trackPref.subOff = true; }
+    else {
+      const t = trackList().subs.find((x) => x.i === i);
+      S.trackPref.sub = t ? t.label : null;
+      S.trackPref.subOff = false;
+    }
+  }
+  S.trackPref.everUsed = true;
+  save();
+}
+
+function selectTrack(kind, i) {
+  if (kind === 'load') { loadAllTracks(); return; }
+  rememberTrackChoice(kind, i);
+  applyTrackChoice(kind, i);
+}
+
+// Aplica en silencio, apenas se conocen las pistas de este video, el audio/subtítulo
+// que el usuario venía usando (por nombre), sin que tenga que volver a elegirlo.
+function applyTrackPref() {
+  const pref = S.trackPref;
+  if (!pref || !pref.everUsed || !current) return;
+  const { audio, subs } = trackList();
+  if (pref.audio) {
+    const t = audio.find((x) => trackPrefKey(x.label) === trackPrefKey(pref.audio));
+    if (t && !t.active) applyTrackChoice('audio', t.i);
+  }
+  if (pref.subOff) {
+    const act = subs.find((x) => x.active);
+    if (act) applyTrackChoice('sub', -1);
+  } else if (pref.sub) {
+    const t = subs.find((x) => trackPrefKey(x.label) === trackPrefKey(pref.sub));
+    if (t && !t.active) applyTrackChoice('sub', t.i);
+  }
+}
+
+// Algunos videos (HLS con subtítulos en el propio m3u8) ya traen sus pistas sin
+// necesidad de buscarlas con ffmpeg; esto las aplica/muestra en cuanto aparecen.
+function onTracksKnown() {
+  applyTrackPref();
+  if (!trackMenu.classList.contains('hidden')) renderTrackMenu();
 }
 
 // Subtítulos extraídos con ffmpeg aparte: los textos se van añadiendo a medida que llegan
@@ -1382,19 +1445,23 @@ function setSubTracks(m) {
 }
 
 // Busca con ffmpeg todos los audios y subtítulos del video y lo reproduce con ellos disponibles
+// Busca audios y subtítulos y deja el menú abierto actualizándose solo, sin un botón aparte:
+// se dispara en cuanto se abre el engranaje (ver #btnTracks), no hace falta pedirlo dos veces.
 async function loadAllTracks() {
   const m = current;
-  if (!m || m.type === 'live' || !/^https?:/i.test(m.url || '')) return;
-  closeMenus();
-  showError('Buscando audios y subtítulos…');
+  if (!m || m.type === 'live' || m.trackInfo || m.loadingTracks || !/^https?:/i.test(m.url || '')) return;
+  m.loadingTracks = true;
+  renderTrackMenu();
+  trackMenu.classList.remove('hidden');
+  speedMenu.classList.add('hidden');
   let info = { audio: [], subs: [] };
   try { info = await window.iptv.probeTracks(m.url); } catch (e) { /* nada */ }
   if (current !== m) return;
   const subs = (info.subs || []).filter((s) => s.text);
   if ((info.audio || []).length < 2 && !subs.length) {
+    m.loadingTracks = false;
     m.trackInfo = { audio: info.audio || [], subs: [] };
-    showError('Este video no trae otros audios ni subtítulos compatibles.');
-    setTimeout(() => { if (current === m) hideError(); }, 2500);
+    renderTrackMenu();
     return;
   }
   m.trackInfo = { audio: info.audio || [], subs };
@@ -1403,7 +1470,11 @@ async function loadAllTracks() {
     audioCount: (info.audio || []).length,
     subs: subs.map((s) => s.i)
   });
-  if (!m.transcoding && current === m) m.trackInfo = null;   // si falló, permite volver a intentarlo
+  if (current !== m) return;
+  m.loadingTracks = false;
+  if (!m.transcoding) { m.trackInfo = null; renderTrackMenu(); return; }   // si falló, permite reintentar
+  applyTrackPref();   // deja listo el audio/subtítulo que se venía usando
+  renderTrackMenu();
 }
 
 /* ===================== reproductor: barra de controles ===================== */
@@ -1535,7 +1606,13 @@ video.addEventListener('volumechange', updateVolUi);
 $('#vPlay').addEventListener('click', togglePlay);
 $('#btnBack10').addEventListener('click', () => skip(-10));
 $('#btnFwd10').addEventListener('click', () => skip(10));
-$('#btnTracks').addEventListener('click', () => toggleMenu(trackMenu, renderTrackMenu));
+$('#btnTracks').addEventListener('click', () => {
+  const m = current;
+  const canLoad = !!m && m.type !== 'live' && !m.trackInfo && !m.loadingTracks && /^https?:/i.test(m.url || '');
+  // primera vez en este video: busca los audios/subtítulos y deja el menú abierto con el resultado
+  if (canLoad) { loadAllTracks(); return; }
+  toggleMenu(trackMenu, renderTrackMenu);
+});
 $('#btnSpeed').addEventListener('click', () => toggleMenu(speedMenu, renderSpeedMenu));
 $('#btnPip').addEventListener('click', togglePip);
 $('#btnFs').addEventListener('click', toggleFullscreen);
