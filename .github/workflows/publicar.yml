@@ -35,4 +35,17 @@ jobs:
           V=$(node -p "require('./package.json').version")
           gh release view "v$V" >/dev/null 2>&1 || gh release create "v$V" --title "IPTV Player $V" --notes "Versión $V"
       - name: Crear instalador y publicar Release
-        run: npm run publish
+        shell: pwsh
+        run: |
+          # GitHub a veces responde 504 (tiempo de espera agotado) justo al subir
+          # el instalador. Esto no es un error del proyecto, así que se reintenta solo.
+          $maxAttempts = 3
+          for ($i = 1; $i -le $maxAttempts; $i++) {
+            Write-Host "Intento $i de $maxAttempts..."
+            npm run publish
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Write-Host "Falló (código $LASTEXITCODE), puede ser un corte pasajero de GitHub. Reintentando en 20 s..."
+            Start-Sleep -Seconds 20
+          }
+          Write-Host "Se agotaron los reintentos."
+          exit 1
