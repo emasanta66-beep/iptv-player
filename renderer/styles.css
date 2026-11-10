@@ -425,3 +425,178 @@ button:focus-visible, .card:focus-visible { outline: 2px solid #69dfbd; outline-
   #app.cinema #playerWrap { padding: 12px; }
   #app.cinema #playerSide { flex-basis: auto; width: 100%; }
 }
+
+
+/* Doble en vivo: dos señales lado a lado con selección de audio */
+#videoBox.dual-live {
+  height: min(58vh, 760px);
+  max-height: none;
+  aspect-ratio: auto;
+}
+#videoBox.dual-live #vstage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px;
+  aspect-ratio: 16 / 9;
+  background: #06090c;
+}
+#videoBox.dual-live #video,
+#videoBox.dual-live #dualSecond {
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  border: 1px solid rgba(154,177,196,.16);
+  border-radius: 11px;
+  background: #020405;
+}
+#videoBox.dual-live #video { object-fit: contain; }
+#videoBox.dual-live #btnInfo,
+#videoBox.dual-live #vinfo,
+#videoBox.dual-live #nextOverlay { display: none !important; }
+#videoBox.dual-live #playerError {
+  inset: 48px calc(50% + 5px) 16px 16px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 10px;
+}
+#videoBox.dual-live #dualLabelA {
+  position: absolute;
+  z-index: 3;
+  top: 19px;
+  left: 20px;
+  max-width: calc(50% - 30px);
+  overflow: hidden;
+  padding: 5px 8px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 7px;
+  background: rgba(5,10,13,.72);
+  color: #e6f0f2;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+#dualSecond {
+  position: relative;
+  display: flex;
+  overflow: hidden;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+}
+#dualSecond video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex: 1;
+  background: #020405;
+  object-fit: contain;
+}
+#dualSecond.has-stream { justify-content: flex-start; }
+#dualSecond .dual-slot-head {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  right: 8px;
+  left: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  pointer-events: none;
+}
+#dualSecond .dual-slot-head > span:first-child {
+  max-width: 70%;
+  overflow: hidden;
+  padding: 5px 8px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 7px;
+  background: rgba(5,10,13,.72);
+  color: #e6f0f2;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#dualSecond .dual-audio-badge {
+  padding: 5px 8px;
+  border: 1px solid rgba(85,210,173,.24);
+  border-radius: 7px;
+  background: rgba(5,10,13,.78);
+  color: #8fe2c8;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .05em;
+}
+#dualSecond .dual-audio-badge.muted { border-color: rgba(186,205,216,.15); color: #a0adb4; }
+#dualEmpty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 16px;
+  background: radial-gradient(ellipse at center, rgba(57,198,163,.08), transparent 65%), #080d12;
+  color: #e9f0f2;
+  text-align: center;
+}
+#dualEmpty b { font-size: 13px; }
+#dualEmpty span { max-width: 220px; color: #93a2aa; font-size: 10px; }
+#dualSecond.has-stream #dualEmpty { display: none; }
+#dualSecondaryError {
+  position: absolute;
+  z-index: 3;
+  inset: 42px 8px 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  border-radius: 9px;
+  background: rgba(0,0,0,.76);
+  color: var(--accent2);
+  font-size: 11px;
+  text-align: center;
+}
+#dualSecond .dual-slot-actions {
+  position: absolute;
+  z-index: 4;
+  right: 9px;
+  bottom: 9px;
+  display: flex;
+  gap: 5px;
+}
+#dualSecond .dual-slot-actions .btn {
+  min-width: 34px;
+  min-height: 32px;
+  padding: 4px 8px;
+  border-color: rgba(255,255,255,.16);
+  background: rgba(5,10,13,.75);
+}
+#dualControls {
+  padding: 11px 0 3px;
+  border-top: 1px solid rgba(154,177,196,.12);
+}
+.dual-control-label { margin: 1px 0 6px; color: #82939e; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+#dualControls .row { margin-bottom: 8px; }
+#dualControls .btn { flex: 1; min-height: 35px; padding: 6px 9px; font-size: 11px; }
+#dualControls .btn.dual-active {
+  border-color: rgba(57,198,163,.36);
+  background: rgba(57,198,163,.12);
+  color: #8ce8cc;
+}
+#dualHint { min-height: 30px; color: #9aa8b9; font-size: 11px; line-height: 1.45; }
+@media (max-width: 760px) {
+  #videoBox.dual-live #vstage { gap: 6px; padding: 6px; }
+  #videoBox.dual-live #dualLabelA { top: 14px; left: 14px; }
+  #dualSecond .dual-slot-head { top: 5px; right: 5px; left: 5px; }
+  #dualSecond .dual-slot-head > span:first-child,
+  #dualSecond .dual-audio-badge,
+  #videoBox.dual-live #dualLabelA { padding: 4px 6px; font-size: 7px; }
+}

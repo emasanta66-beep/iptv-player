@@ -44,6 +44,13 @@ const cache = {};                // por lista: {live,movie,series,cats,epgUrl}
 const xmltvCache = {};           // url -> texto
 let current = null;              // reproducción actual
 let hls = null;
+let dualMode = false;
+let dualTarget = 'b';
+let dualAudio = 'a';
+let secondaryCurrent = null;
+let secondaryHls = null;
+let dualAudioSaved = null;
+let secondaryFallback = false;
 let countdownTimer = null;
 let lastSave = 0;
 let ignoredPauseEvents = 0;
@@ -655,7 +662,164 @@ function hideError() {
   el.classList.remove('soft');
 }
 
-function playMedia(m) {  const v = $('#video');
+function dualLabels() {
+  const name = (item, fallback) => item ? item.title : fallback;
+  $('#dualLabelA').textContent = 'A · ' + name(current && current.item, current ? current.title : 'CANAL PRINCIPAL');
+  $('#dualLabelB').textContent = 'B · ' + name(secondaryCurrent && secondaryCurrent.item, 'ELIGE UN CANAL');
+  $('#dualAudioBadgeB').textContent = dualAudio === 'b' ? 'AUDIO ACTIVO' : 'SILENCIADO';
+  $('#dualAudioBadgeB').classList.toggle('muted', dualAudio !== 'b');
+  $('#dualEmpty').classList.toggle('hidden', !!secondaryCurrent);
+  $('#btnDualPlayB').classList.toggle('hidden', !secondaryCurrent);
+  $('#btnDualFsB').classList.toggle('hidden', !secondaryCurrent);
+  $('#btnDualTargetA').classList.toggle('active', dualTarget === 'a');
+  $('#btnDualTargetB').classList.toggle('active', dualTarget === 'b');
+  $('#btnDualAudioA').classList.toggle('active', dualAudio === 'a');
+  $('#btnDualAudioB').classList.toggle('active', dualAudio === 'b');
+  $('#dualHint').textContent = secondaryCurrent
+    ? 'Elige una pantalla y pulsa otro canal de la lista para cambiarlo.'
+    : 'Elige un canal de la lista para completar la pantalla B.';
+}
+function setDualAudio(slot) {
+  dualAudio = slot === 'b' && secondaryCurrent ? 'b' : 'a';
+  const a = $('#video'), b = $('#videoSecondary');
+  a.muted = dualAudio !== 'a';
+  b.muted = dualAudio !== 'b';
+  if (dualAudio === 'a' && a.volume === 0) a.volume = 0.5;
+  if (dualAudio === 'b' && b.volume === 0) b.volume = 0.5;
+  dualLabels();
+  updateVolUi();
+}
+function openDualMode() {
+  if (!current || current.type !== 'live') return;
+  if (!dualMode) dualAudioSaved = { muted: $('#video').muted, volume: $('#video').volume };
+  dualMode = true;
+  dualTarget = 'b';
+  $('#videoBox').classList.add('dual-live');
+  $('#dualSecond').classList.remove('hidden');
+  $('#dualControls').classList.remove('hidden');
+  $('#dualLabelA').classList.remove('hidden');
+  $('#btnDual').textContent = '▣ Salir de doble vista';
+  setDualAudio('a');
+  dualLabels();
+}
+function destroySecondary() {
+  if (secondaryHls) { try { secondaryHls.destroy(); } catch (_) {} secondaryHls = null; }
+  const v = $('#videoSecondary');
+  v.onerror = null;
+  v.pause();
+  v.removeAttribute('src');
+  v.load();
+  window.iptv.dualTranscodeStop().catch(() => {});
+  secondaryCurrent = null;
+  secondaryFallback = false;
+}
+function closeDualMode() {
+  if (!dualMode) return;
+  destroySecondary();
+  dualMode = false;
+  $('#videoBox').classList.remove('dual-live');
+  $('#dualSecond').classList.add('hidden');
+  $('#dualControls').classList.add('hidden');
+  $('#dualLabelA').classList.add('hidden');
+  $('#btnDual').textContent = '▣ Doble en vivo';
+  if (dualAudioSaved) {
+    $('#video').muted = dualAudioSaved.muted;
+    $('#video').volume = dualAudioSaved.volume;
+    dualAudioSaved = null;
+  }
+  updateVolUi();
+}
+async function transcodeSecondary(item, full) {
+  if (!dualMode || secondaryCurrent !== item || item.converting) return;
+  item.converting = true;
+  if (secondaryHls) { try { secondaryHls.destroy(); } catch (_) {} secondaryHls = null; }
+  const video = $('#videoSecondary');
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
+  try {
+    const r = await window.iptv.dualTranscodeStart(item.url, !!full);
+    if (secondaryCurrent !== item || !dualMode) return;
+    if (!r || !r.ok) throw new Error(r && r.error || 'No se pudo preparar el canal');
+    item.converting = false;
+    item.transcoded = true;
+    const v = $('#videoSecondary');
+    const player = createHls({ maxBufferLength: 12, backBufferLength: 5 });
+    secondaryHls = player;
+    player.on(window.Hls.Events.ERROR, (_e, d) => {
+      if (!d.fatal || secondaryCurrent !== item || secondaryHls !== player) return;
+      $('#dualSecondaryError').textContent = 'No se pudo reproducir este canal.';
+      $('#dualSecondaryError').classList.remove('hidden');
+    });
+    player.on(window.Hls.Events.MANIFEST_PARSED, () => {
+      if (secondaryCurrent === item && secondaryHls === player) v.play().catch(() => {});
+    });
+    player.loadSource(r.url);
+    player.attachMedia(v);
+    $('#dualSecondaryError').classList.add('hidden');
+  } catch (err) {
+    if (secondaryCurrent !== item) return;
+    item.converting = false;
+    $('#dualSecondaryError').textContent = err.message || 'No se pudo cargar el canal.';
+    $('#dualSecondaryError').classList.remove('hidden');
+  }
+}
+function loadDualSecondary(item) {
+  destroySecondary();
+  const m = { key: item.key, title: item.title, url: streamUrl(item), type: 'live', item };
+  secondaryCurrent = m;
+  dualLabels();
+  $('#dualSecondaryError').classList.add('hidden');
+  const v = $('#videoSecondary');
+  const isHls = /\\.m3u8(\\?|$)/i.test(m.url);
+  if (isHls && window.Hls && window.Hls.isSupported()) {
+    const player = createHls({ maxBufferLength: 12, backBufferLength: 5 });
+    secondaryHls = player;
+    player.on(window.Hls.Events.ERROR, (_e, d) => {
+      if (!d.fatal || secondaryCurrent !== m || secondaryHls !== player) return;
+      if (d.type === window.Hls.ErrorTypes.MEDIA_ERROR && !m.recovered) {
+        m.recovered = true; player.recoverMediaError(); return;
+      }
+      if (!m.fallbackStarted) {
+        m.fallbackStarted = true;
+        transcodeSecondary(m, d.type === window.Hls.ErrorTypes.MEDIA_ERROR);
+      } else {
+        $('#dualSecondaryError').textContent = 'No se pudo reproducir este canal.';
+        $('#dualSecondaryError').classList.remove('hidden');
+      }
+    });
+    player.on(window.Hls.Events.MANIFEST_PARSED, () => {
+      if (secondaryCurrent === m && secondaryHls === player) v.play().catch(() => {});
+    });
+    player.loadSource(m.url);
+    player.attachMedia(v);
+  } else {
+    v.onerror = () => {
+      if (secondaryCurrent === m && !m.fallbackStarted) {
+        m.fallbackStarted = true; transcodeSecondary(m, true);
+      } else if (secondaryCurrent === m) {
+        $('#dualSecondaryError').textContent = 'No se pudo reproducir este canal.';
+        $('#dualSecondaryError').classList.remove('hidden');
+      }
+    };
+    v.src = m.url;
+    v.play().catch(() => {});
+  }
+  if (dualAudio === 'b') setDualAudio('b');
+  dualLabels();
+}
+function playDualItem(item) {
+  if (!item || item.type !== 'live') return;
+  if (dualTarget === 'a') {
+    playMedia({ key: item.key, title: item.title, url: streamUrl(item), type: 'live', item, img: item.logo || '', plot: item.plot || '' }, true);
+  } else {
+    loadDualSecondary(item);
+  }
+}
+
+function playMedia(m, preserveDual) {
+  if (dualMode && !preserveDual) closeDualMode();
+  const v = $('#video');
   if (current) saveProgress(true);
   current = null;
   v.onloadedmetadata = null;
@@ -678,6 +842,8 @@ function playMedia(m) {  const v = $('#video');
   hideError();
   $('#playerWrap').classList.remove('hidden');
   $('#nowTitle').textContent = (m.seriesItem ? m.seriesItem.title + ' — ' : '') + m.title;
+  $('#btnDual').classList.toggle('hidden', m.type !== 'live');
+  if (dualMode) { setDualAudio('a'); dualLabels(); }
   $('#btnPrev').classList.toggle('hidden', !m.queue);
   $('#btnNext').classList.toggle('hidden', !m.queue);
   $('#btnFavNow').classList.toggle('hidden', !!m.queue || !m.item);
@@ -733,6 +899,7 @@ function playMedia(m) {  const v = $('#video');
 }
 
 function playItem(item) {
+  if (dualMode && item.type === 'live') { playDualItem(item); return; }
   playMedia({ key: item.key, title: item.title, url: streamUrl(item), type: item.type, item, img: item.logo || '', plot: item.plot || '' });
 }
 
@@ -810,7 +977,10 @@ function goPrev() {
   playQueue(current.queue, current.index - 1, current.seriesItem);
 }
 
-function closePlayer() {  const v = $('#video');
+function closePlayer() {
+  closeDualMode();
+  $('#btnDual').classList.add('hidden');
+  const v = $('#video');
   saveProgress(true);
   current = null;
   v.onloadedmetadata = null;
@@ -1206,6 +1376,7 @@ async function ensureLoadedForFavs() {
 }
 
 async function switchPlaylist(id) {
+  closeDualMode();
   S.active = id;
   save();
   await setTab(tab);
@@ -1976,6 +2147,21 @@ function wakeControls() {
 video.addEventListener('volumechange', updateVolUi);
 
 /* botones */
+$('#btnDual').addEventListener('click', () => dualMode ? closeDualMode() : openDualMode());
+$('#btnDualTargetA').addEventListener('click', () => { dualTarget = 'a'; dualLabels(); });
+$('#btnDualTargetB').addEventListener('click', () => { dualTarget = 'b'; dualLabels(); });
+$('#btnDualAudioA').addEventListener('click', () => setDualAudio('a'));
+$('#btnDualAudioB').addEventListener('click', () => setDualAudio('b'));
+$('#btnDualPlayB').addEventListener('click', () => {
+  const v = $('#videoSecondary');
+  if (v.paused) v.play().catch(() => {}); else v.pause();
+});
+$('#btnDualFsB').addEventListener('click', () => {
+  const pane = $('#dualSecond');
+  if (document.fullscreenElement) document.exitFullscreen();
+  else pane.requestFullscreen().catch(() => {});
+});
+
 $('#vPlay').addEventListener('click', togglePlay);
 $('#btnBack10').addEventListener('click', () => skip(-10));
 $('#btnFwd10').addEventListener('click', () => skip(10));
