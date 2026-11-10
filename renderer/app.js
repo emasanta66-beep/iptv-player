@@ -732,6 +732,11 @@ function closeDualMode() {
 async function transcodeSecondary(item, full) {
   if (!dualMode || secondaryCurrent !== item || item.converting) return;
   item.converting = true;
+  if (secondaryHls) { try { secondaryHls.destroy(); } catch (_) {} secondaryHls = null; }
+  const video = $('#videoSecondary');
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
   try {
     const r = await window.iptv.dualTranscodeStart(item.url, !!full);
     if (secondaryCurrent !== item || !dualMode) return;
