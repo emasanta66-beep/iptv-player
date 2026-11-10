@@ -2,7 +2,9 @@ name: Publicar instalador
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    paths:
+      - package.json
   workflow_dispatch:
 
 permissions:
