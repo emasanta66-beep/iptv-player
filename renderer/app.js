@@ -812,7 +812,9 @@ function playDualItem(item) {
   }
 }
 
-function playMedia(m, preserveDual) {  const v = $('#video');
+function playMedia(m, preserveDual) {
+  if (dualMode && !preserveDual) closeDualMode();
+  const v = $('#video');
   if (current) saveProgress(true);
   current = null;
   v.onloadedmetadata = null;
@@ -970,7 +972,10 @@ function goPrev() {
   playQueue(current.queue, current.index - 1, current.seriesItem);
 }
 
-function closePlayer() {  const v = $('#video');
+function closePlayer() {
+  closeDualMode();
+  $('#btnDual').classList.add('hidden');
+  const v = $('#video');
   saveProgress(true);
   current = null;
   v.onloadedmetadata = null;
