@@ -38,7 +38,21 @@
     <section id="playerWrap" class="hidden">
       <div id="videoBox">
         <div id="vstage">
-          <video id="video" autoplay></video>
+          <video id="video" autoplay playsinline></video>
+          <div id="dualLabelA" class="dual-label-a hidden">A · CANAL PRINCIPAL</div>
+          <div id="dualSecond" class="dual-slot hidden" aria-label="Segundo canal en vivo">
+            <div class="dual-slot-head"><span id="dualLabelB">B · ELIGE UN CANAL</span><span id="dualAudioBadgeB" class="dual-audio-badge muted">SILENCIADO</span></div>
+            <video id="videoSecondary" autoplay playsinline muted></video>
+            <div id="dualEmpty" class="dual-empty">
+              <b>Elige el canal B</b>
+              <span>Selecciona este panel y luego un canal en la lista.</span>
+            </div>
+            <div id="dualSecondaryError" class="dual-secondary-error hidden" role="alert"></div>
+            <div class="dual-slot-actions">
+              <button id="btnDualPlayB" class="btn hidden" title="Pausar o reproducir el canal B">Ⅱ</button>
+              <button id="btnDualFsB" class="btn hidden" title="Pantalla completa del canal B">⛶</button>
+            </div>
+          </div>
           <button id="btnInfo" class="vbtn" title="Información">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
           </button>
@@ -111,7 +125,15 @@
           <button id="btnAudio" class="btn" title="Convierte el audio a un formato compatible">🔊 Reparar audio</button>
           <button id="btnVlc" class="btn">Abrir en VLC</button>
           <button id="btnCinema" class="btn" title="Ocultar biblioteca y ampliar el reproductor">▣ Modo cine</button>
+          <button id="btnDual" class="btn hidden" title="Ver dos canales en vivo a la vez">▣ Doble en vivo</button>
           <button id="btnClose" class="btn">✕</button>
+        </div>
+        <div id="dualControls" class="dual-controls hidden">
+          <div class="dual-control-label">Panel seleccionado</div>
+          <div class="row"><button id="btnDualTargetA" class="btn">Canal A</button><button id="btnDualTargetB" class="btn">Canal B</button></div>
+          <div class="dual-control-label">Audio</div>
+          <div class="row"><button id="btnDualAudioA" class="btn">Oír canal A</button><button id="btnDualAudioB" class="btn">Oír canal B</button></div>
+          <div id="dualHint" class="dual-hint">Elige un canal de la lista para completar la pantalla.</div>
         </div>
         <label class="auto"><input type="checkbox" id="autoNext" checked> Siguiente capítulo automático</label>
         <div id="epg"></div>
