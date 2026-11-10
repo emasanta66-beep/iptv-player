@@ -834,7 +834,9 @@ function playMedia(m, preserveDual) {  const v = $('#video');
   hideNextOverlay();
   hideError();
   $('#playerWrap').classList.remove('hidden');
-  $('#nowTitle').textContent = (m.seriesItem ? m.seriesItem.title + ' — ' : '') + m.title;\n  $('#btnDual').classList.toggle('hidden', m.type !== 'live');\n  if (dualMode) { setDualAudio('a'); dualLabels(); }
+  $('#nowTitle').textContent = (m.seriesItem ? m.seriesItem.title + ' — ' : '') + m.title;
+  $('#btnDual').classList.toggle('hidden', m.type !== 'live');
+  if (dualMode) { setDualAudio('a'); dualLabels(); }
   $('#btnPrev').classList.toggle('hidden', !m.queue);
   $('#btnNext').classList.toggle('hidden', !m.queue);
   $('#btnFavNow').classList.toggle('hidden', !!m.queue || !m.item);
@@ -890,6 +892,7 @@ function playMedia(m, preserveDual) {  const v = $('#video');
 }
 
 function playItem(item) {
+  if (dualMode && item.type === 'live') { playDualItem(item); return; }
   playMedia({ key: item.key, title: item.title, url: streamUrl(item), type: item.type, item, img: item.logo || '', plot: item.plot || '' });
 }
 
@@ -1363,6 +1366,7 @@ async function ensureLoadedForFavs() {
 }
 
 async function switchPlaylist(id) {
+  closeDualMode();
   S.active = id;
   save();
   await setTab(tab);
