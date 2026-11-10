@@ -2146,7 +2146,8 @@ function wakeControls() {
 ['loadedmetadata', 'playing'].forEach((ev) => video.addEventListener(ev, updateTrackIcon));
 video.addEventListener('volumechange', updateVolUi);
 
-/* botones */\n$('#btnDual').addEventListener('click', () => dualMode ? closeDualMode() : openDualMode());
+/* botones */
+$('#btnDual').addEventListener('click', () => dualMode ? closeDualMode() : openDualMode());
 $('#btnDualTargetA').addEventListener('click', () => { dualTarget = 'a'; dualLabels(); });
 $('#btnDualTargetB').addEventListener('click', () => { dualTarget = 'b'; dualLabels(); });
 $('#btnDualAudioA').addEventListener('click', () => setDualAudio('a'));
