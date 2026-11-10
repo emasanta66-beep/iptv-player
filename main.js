@@ -135,7 +135,7 @@ app.on('window-all-closed', () => {
   stopTranscode();
   if (process.platform !== 'darwin') app.quit();
 });
-app.on('before-quit', () => { stopTranscode(); dlPauseAll(); });
+app.on('before-quit', () => { stopTranscode(); stopDualTranscode(); dlPauseAll(); });
 
 function maybeGunzip(buf) {
   if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
@@ -522,6 +522,10 @@ let hlsPort = 0;
 let ffProc = null;
 let ffDir = null;
 let transcodeGeneration = 0;
+let dualFfProc = null;
+let dualFfDir = null;
+let dualTranscodeGeneration = 0;
+let dualSequence = 0;
 let subProcs = new Set();   // procesos que extraen los subtítulos aparte
 let probeProcs = new Set(); // sondeos de pistas activos
 let trackProcs = new Set(); // extracción directa de subtítulos
@@ -604,6 +608,71 @@ function resolveFfmpeg() {
 }
 
 ipcMain.handle('transcode-stop', () => { stopTranscode(); return true; });
+function stopDualTranscode() {
+  dualTranscodeGeneration++;
+  if (dualFfProc) {
+    try { dualFfProc.kill('SIGKILL'); } catch (e) { /* nada */ }
+    dualFfProc = null;
+  }
+  if (dualFfDir) {
+    const dir = dualFfDir;
+    dualFfDir = null;
+    setTimeout(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* nada */ } }, 500);
+  }
+}
+
+ipcMain.handle('dual-transcode-stop', () => { stopDualTranscode(); return true; });
+
+// Conversión HLS aislada para el segundo reproductor en modo doble.
+ipcMain.handle('dual-transcode-start', async (_e, url, full) => {
+  stopDualTranscode();
+  const generation = dualTranscodeGeneration;
+  if (typeof url !== 'string' || !/^https?:/i.test(url)) return { ok: false, error: 'La dirección del canal no es válida.' };
+  try {
+    const port = await startHlsServer();
+    if (generation !== dualTranscodeGeneration) return { ok: false, error: 'Conversión cancelada' };
+    const id = 'd' + Date.now().toString(36) + (++dualSequence).toString(36);
+    const dir = path.join(HLS_ROOT, id);
+    fs.mkdirSync(dir, { recursive: true });
+    dualFfDir = dir;
+    const args = ['-hide_banner', '-loglevel', 'error',
+      '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20',
+      '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5',
+      '-i', url, '-map', '0:v:0?', '-map', '0:a:0?'];
+    if (full) args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p');
+    else args.push('-c:v', 'copy');
+    args.push('-c:a', 'aac', '-ac', '2', '-b:a', '192k', '-f', 'hls', '-hls_time', '4',
+      '-hls_list_size', '6', '-hls_flags', 'delete_segments',
+      '-hls_segment_filename', path.join(dir, 'seg%05d.ts'), path.join(dir, 'index.m3u8'));
+    let stderr = '';
+    let exited = null;
+    const proc = spawn(resolveFfmpeg(), args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    dualFfProc = proc;
+    proc.stderr.on('data', (d) => { stderr = (stderr + d.toString()).slice(-1200); });
+    proc.on('error', (err) => { exited = 'error:' + err.message; });
+    proc.on('exit', (code) => { exited = 'code:' + code; });
+    const playlist = path.join(dir, 'index.m3u8');
+    const hasSegments = (file) => { try { return fs.readFileSync(file, 'utf8').includes('.ts'); } catch (e) { return false; } };
+    const started = Date.now();
+    while (Date.now() - started < 20000) {
+      if (generation !== dualTranscodeGeneration) return { ok: false, error: 'Conversión cancelada' };
+      if (fs.existsSync(playlist) && hasSegments(playlist)) {
+        return { ok: true, url: `http://127.0.0.1:${port}/${id}/index.m3u8` };
+      }
+      if (exited && exited.startsWith('error:')) {
+        return { ok: false, error: 'No se pudo iniciar ffmpeg para el segundo canal.' };
+      }
+      if (exited && exited !== 'code:0') {
+        return { ok: false, error: 'No se pudo convertir este canal: ' + (stderr.trim().split('\\n').pop() || exited) };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    stopDualTranscode();
+    return { ok: false, error: 'La conversión del segundo canal tardó demasiado.' };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
 /* ===================== pistas de audio y subtítulos del video ===================== */
 const LANG_NAMES = {
   spa: 'Español', es: 'Español', eng: 'Inglés', en: 'Inglés', por: 'Portugués', pt: 'Portugués',
