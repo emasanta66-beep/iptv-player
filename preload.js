@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('iptv', {
   openVlc: (url, opts) => ipcRenderer.invoke('open-vlc', url, opts),
   transcodeStart: (url, opts) => ipcRenderer.invoke('transcode-start', url, opts),
   transcodeStop: () => ipcRenderer.invoke('transcode-stop'),
+  dualTranscodeStart: (url, full) => ipcRenderer.invoke('dual-transcode-start', url, !!full),
+  dualTranscodeStop: () => ipcRenderer.invoke('dual-transcode-stop'),
   probeTracks: (url) => ipcRenderer.invoke('probe-tracks', url),
   extractSub: (i, url, start) => ipcRenderer.invoke('extract-sub', i, url, start),
   subStatus: (i, url) => ipcRenderer.invoke('sub-status', i, url),
